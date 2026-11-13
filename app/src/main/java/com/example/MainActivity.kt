@@ -22,50 +22,41 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.outlined.Apps
-import androidx.compose.material.icons.outlined.CloudQueue
-import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.VpnConnectionState
 import com.example.ui.VpnViewModel
+import com.example.ui.components.FloatingLiquidDock
+import com.example.ui.components.FluidMeshBackground
+import com.example.ui.components.LiquidDockTab
+import com.example.ui.components.LiquidGlassCard
 import com.example.ui.screens.AppsScreen
 import com.example.ui.screens.MainScreen
 import com.example.ui.screens.SourcesScreen
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.MyApplicationTheme
-
-enum class AppDestination {
-    DASHBOARD,
-    APPS_SPLIT_TUNNEL,
-    SOURCES_AND_KEYS
-}
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,25 +75,26 @@ fun AegisBoxVpnApp(
     vpnViewModel: VpnViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    var currentTab by rememberSaveable { mutableStateOf(AppDestination.DASHBOARD) }
+    var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
+    val hazeState = remember { HazeState() }
 
     val telemetry by vpnViewModel.telemetryState.collectAsStateWithLifecycle()
+    val coreLogs by vpnViewModel.coreLogs.collectAsStateWithLifecycle()
     val nodes by vpnViewModel.nodes.collectAsStateWithLifecycle()
     val routingMode by vpnViewModel.routingMode.collectAsStateWithLifecycle()
     val warpConfig by vpnViewModel.warpConfig.collectAsStateWithLifecycle()
     val sources by vpnViewModel.subscriptionSources.collectAsStateWithLifecycle()
     val whitelistPackages by vpnViewModel.whitelistPackages.collectAsStateWithLifecycle()
+    val includeGmsDependencies by vpnViewModel.includeGmsDependencies.collectAsStateWithLifecycle()
     val appItems by vpnViewModel.appRoutingItems.collectAsStateWithLifecycle()
     val isSyncing by vpnViewModel.isSyncingServers.collectAsStateWithLifecycle()
     val isGeneratingWarp by vpnViewModel.isGeneratingWarp.collectAsStateWithLifecycle()
     val bannerMessage by vpnViewModel.statusBannerMessage.collectAsStateWithLifecycle()
 
-    // Android 13+ notification permission launcher for Foreground VPN Service notification
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { /* proceed regardless */ }
+    ) { }
 
-    // Android VpnService.prepare() consent dialog launcher
     val vpnConsentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -119,11 +111,7 @@ fun AegisBoxVpnApp(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
-            val prepareIntent = try {
-                VpnService.prepare(context)
-            } catch (_: Exception) {
-                null
-            }
+            val prepareIntent = runCatching { VpnService.prepare(context) }.getOrNull()
             if (prepareIntent != null) {
                 vpnConsentLauncher.launch(prepareIntent)
             } else {
@@ -132,90 +120,57 @@ fun AegisBoxVpnApp(
         }
     }
 
-    if (currentTab != AppDestination.DASHBOARD) {
+    if (selectedTabIndex != 0) {
         BackHandler {
-            currentTab = AppDestination.DASHBOARD
+            selectedTabIndex = 0
         }
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        contentWindowInsets = WindowInsets.safeDrawing,
-        bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                tonalElevation = 8.dp
-            ) {
-                NavigationBarItem(
-                    selected = currentTab == AppDestination.DASHBOARD,
-                    onClick = { currentTab = AppDestination.DASHBOARD },
-                    icon = {
-                        Icon(
-                            imageVector = if (currentTab == AppDestination.DASHBOARD) Icons.Filled.Shield else Icons.Outlined.Shield,
-                            contentDescription = stringResource(R.string.nav_dashboard)
-                        )
-                    },
-                    label = { Text(stringResource(R.string.nav_dashboard)) },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = ElectricCyan,
-                        selectedTextColor = ElectricCyan,
-                        indicatorColor = ElectricCyan.copy(alpha = 0.16f)
-                    ),
-                    modifier = Modifier.testTag("nav_tab_dashboard")
-                )
+    val tabs = listOf(
+        LiquidDockTab(
+            title = stringResource(R.string.nav_dashboard),
+            icon = Icons.Filled.Shield,
+            testTag = "nav_tab_dashboard"
+        ),
+        LiquidDockTab(
+            title = stringResource(R.string.nav_apps),
+            icon = Icons.Filled.Apps,
+            badgeCount = whitelistPackages.size,
+            testTag = "nav_tab_apps"
+        ),
+        LiquidDockTab(
+            title = stringResource(R.string.nav_sources),
+            icon = Icons.Filled.CloudQueue,
+            testTag = "nav_tab_sources"
+        )
+    )
 
-                NavigationBarItem(
-                    selected = currentTab == AppDestination.APPS_SPLIT_TUNNEL,
-                    onClick = { currentTab = AppDestination.APPS_SPLIT_TUNNEL },
-                    icon = {
-                        Icon(
-                            imageVector = if (currentTab == AppDestination.APPS_SPLIT_TUNNEL) Icons.Filled.Apps else Icons.Outlined.Apps,
-                            contentDescription = stringResource(R.string.nav_apps)
-                        )
-                    },
-                    label = { Text("${stringResource(R.string.nav_apps)} (${whitelistPackages.size})") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = ElectricCyan,
-                        selectedTextColor = ElectricCyan,
-                        indicatorColor = ElectricCyan.copy(alpha = 0.16f)
-                    ),
-                    modifier = Modifier.testTag("nav_tab_apps")
-                )
-
-                NavigationBarItem(
-                    selected = currentTab == AppDestination.SOURCES_AND_KEYS,
-                    onClick = { currentTab = AppDestination.SOURCES_AND_KEYS },
-                    icon = {
-                        Icon(
-                            imageVector = if (currentTab == AppDestination.SOURCES_AND_KEYS) Icons.Filled.CloudQueue else Icons.Outlined.CloudQueue,
-                            contentDescription = stringResource(R.string.nav_sources)
-                        )
-                    },
-                    label = { Text(stringResource(R.string.nav_sources)) },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = ElectricCyan,
-                        selectedTextColor = ElectricCyan,
-                        indicatorColor = ElectricCyan.copy(alpha = 0.16f)
-                    ),
-                    modifier = Modifier.testTag("nav_tab_sources")
-                )
-            }
-        }
-    ) { innerPadding ->
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 1. Live Dynamic Fluid Mesh Backdrop + Haze Source Layer
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .hazeSource(state = hazeState)
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            FluidMeshBackground(
+                isVpnConnected = telemetry.connectionState == VpnConnectionState.CONNECTED
+            )
+
+            // 2. Main Content Container (status bar safe padding + generous bottom padding in LazyColumns)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.statusBars)
+            ) {
                 AnimatedVisibility(
                     visible = bannerMessage != null,
                     enter = fadeIn(),
                     exit = fadeOut()
                 ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = RoundedCornerShape(12.dp),
+                    LiquidGlassCard(
+                        hazeState = hazeState,
+                        accentGlowColor = ElectricCyan,
+                        shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 6.dp)
@@ -223,14 +178,14 @@ fun AegisBoxVpnApp(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = bannerMessage.orEmpty(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f)
                             )
                             TextButton(onClick = { vpnViewModel.dismissBanner() }) {
@@ -240,9 +195,11 @@ fun AegisBoxVpnApp(
                     }
                 }
 
-                when (currentTab) {
-                    AppDestination.DASHBOARD -> MainScreen(
+                when (selectedTabIndex) {
+                    0 -> MainScreen(
+                        hazeState = hazeState,
                         telemetry = telemetry,
+                        coreLogs = coreLogs,
                         nodes = nodes,
                         warpConfig = warpConfig,
                         routingMode = routingMode,
@@ -254,18 +211,23 @@ fun AegisBoxVpnApp(
                         onSwitchNextNode = vpnViewModel::switchToNextNode,
                         onForceRefreshNodes = vpnViewModel::forceSyncAndTestFreeServers,
                         onOpenGeminiSettings = vpnViewModel::openGoogleOrGeminiAppSettings,
+                        onClearLogs = vpnViewModel::clearCoreLogs,
                         modifier = Modifier.weight(1f)
                     )
 
-                    AppDestination.APPS_SPLIT_TUNNEL -> AppsScreen(
+                    1 -> AppsScreen(
+                        hazeState = hazeState,
                         apps = appItems,
                         whitelistedPackages = whitelistPackages,
+                        includeGmsDependencies = includeGmsDependencies,
+                        onToggleGmsDependencies = vpnViewModel::toggleIncludeGmsDependencies,
                         onToggleApp = vpnViewModel::toggleAppWhitelist,
                         onResetDefaults = vpnViewModel::resetWhitelistToDefaults,
                         modifier = Modifier.weight(1f)
                     )
 
-                    AppDestination.SOURCES_AND_KEYS -> SourcesScreen(
+                    else -> SourcesScreen(
+                        hazeState = hazeState,
                         sources = sources,
                         warpConfig = warpConfig,
                         isGeneratingWarp = isGeneratingWarp,
@@ -278,5 +240,14 @@ fun AegisBoxVpnApp(
                 }
             }
         }
+
+        // 3. Floating Liquid Glass Pill Dock
+        FloatingLiquidDock(
+            hazeState = hazeState,
+            tabs = tabs,
+            selectedIndex = selectedTabIndex,
+            onSelectTab = { selectedTabIndex = it },
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
     }
 }

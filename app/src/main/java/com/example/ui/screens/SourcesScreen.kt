@@ -5,14 +5,12 @@ import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,17 +25,12 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.VpnKey
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,15 +48,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.SubscriptionSource
 import com.example.model.WarpConfig
+import com.example.ui.components.LiquidGlassButton
+import com.example.ui.components.LiquidGlassCard
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.SignalAmber
 import com.example.ui.theme.WarpViolet
+import dev.chrisbanes.haze.HazeState
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SourcesScreen(
+    hazeState: HazeState,
     sources: List<SubscriptionSource>,
     warpConfig: WarpConfig,
     isGeneratingWarp: Boolean,
@@ -78,118 +74,161 @@ fun SourcesScreen(
     var newSourceTitle by remember { mutableStateOf("") }
     var newSourceUrl by remember { mutableStateOf("") }
 
+    val glassTextFieldColors = OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = Color.White.copy(alpha = 0.08f),
+        unfocusedContainerColor = Color.White.copy(alpha = 0.05f),
+        focusedBorderColor = ElectricCyan,
+        unfocusedBorderColor = Color.White.copy(alpha = 0.16f)
+    )
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .testTag("sources_screen_list"),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 118.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Cloudflare WARP + AmneziaWG Generator Card
+        // 1. Real Cloudflare WARP X25519 Registration Card
         item {
-            Card(
+            LiquidGlassCard(
+                hazeState = hazeState,
+                accentGlowColor = WarpViolet,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag("warp_generator_card"),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                border = BorderStroke(1.dp, WarpViolet.copy(alpha = 0.45f))
+                    .testTag("warp_generator_card")
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.VpnKey,
-                            contentDescription = "Cloudflare WARP",
-                            tint = WarpViolet
-                        )
-                        Column {
-                            Text(
-                                text = "Генератор Cloudflare WARP • AmneziaWG",
-                                style = MaterialTheme.typography.titleMedium
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VpnKey,
+                                contentDescription = "Cloudflare WARP",
+                                tint = WarpViolet
                             )
+                            Column {
+                                Text(
+                                    text = "Cloudflare WARP (X25519)",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Регистрация устройства через Cloudflare API",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = (if (warpConfig.isRegistered) CyberEmerald else SignalAmber).copy(alpha = 0.16f)
+                        ) {
                             Text(
-                                text = "Чистый выходной IP для Google Gemini в цепочке VLESS → WARP Detour",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = if (warpConfig.isRegistered) "Активен" else "Не создан",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (warpConfig.isRegistered) CyberEmerald else SignalAmber,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
                     }
 
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color.White.copy(alpha = 0.05f),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
                             modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            WarpKeyValRow("Device ID", warpConfig.deviceId)
-                            WarpKeyValRow("Endpoint", "${warpConfig.endpointHost}:${warpConfig.endpointPort}")
-                            WarpKeyValRow("Local IPv4", warpConfig.localAddressIpv4)
-                            WarpKeyValRow("Client Reserved", warpConfig.reservedBytes.joinToString(", ", "[", "]"))
-                            WarpKeyValRow("Private Key", warpConfig.privateKey.take(24) + "…")
-                            WarpKeyValRow(
-                                "AmneziaWG Junk",
-                                "Jc=${warpConfig.awgJc}, Jmin=${warpConfig.awgJmin}, Jmax=${warpConfig.awgJmax}, S1=${warpConfig.awgS1}, S2=${warpConfig.awgS2}"
-                            )
+                            if (warpConfig.isRegistered) {
+                                WarpKeyValRow("Device ID", warpConfig.deviceId)
+                                WarpKeyValRow("Endpoint", "${warpConfig.endpointHost}:${warpConfig.endpointPort}")
+                                WarpKeyValRow("Local IPv4", warpConfig.localAddressIpv4)
+                                if (warpConfig.localAddressIpv6.isNotBlank()) {
+                                    WarpKeyValRow("Local IPv6", warpConfig.localAddressIpv6)
+                                }
+                                WarpKeyValRow("Reserved", warpConfig.reservedBytes.joinToString(", ", "[", "]"))
+                                WarpKeyValRow("PrivateKey", warpConfig.privateKey.take(22) + "…")
+                                WarpKeyValRow("PeerKey", warpConfig.peerPublicKey.take(22) + "…")
+                            } else {
+                                Text(
+                                    text = "Профиль WARP не зарегистрирован. Нажмите кнопку ниже, чтобы сгенерировать пару ключей Curve25519 и получить конфигурацию от api.cloudflareclient.com.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
 
-                    Button(
+                    LiquidGlassButton(
+                        hazeState = hazeState,
                         onClick = onRegenerateWarp,
                         enabled = !isGeneratingWarp,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = WarpViolet,
-                            contentColor = Color.White
-                        ),
+                        accentColor = WarpViolet,
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .defaultMinSize(minHeight = 50.dp)
                             .testTag("regenerate_warp_button")
                     ) {
-                        if (isGeneratingWarp) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Регистрация нового WARP аккаунта…")
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.CloudSync,
-                                contentDescription = "Перегенерировать WARP"
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Перегенерировать бесплатный ключ WARP",
-                                fontWeight = FontWeight.Bold
-                            )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            if (isGeneratingWarp) {
+                                CircularProgressIndicator(
+                                    color = WarpViolet,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Регистрация в Cloudflare API…",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = WarpViolet
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.CloudSync,
+                                    contentDescription = "Зарегистрировать WARP",
+                                    tint = WarpViolet
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (warpConfig.isRegistered) {
+                                        "Перегенерировать ключ Cloudflare WARP"
+                                    } else {
+                                        "Зарегистрировать бесплатный WARP"
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 2. Manual Key Import Card (Clipboard or direct paste)
+        // 2. Manual Key / URI / sing-box JSON Importer
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant)
+            LiquidGlassCard(
+                hazeState = hazeState,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -206,11 +245,11 @@ fun SourcesScreen(
                         )
                         Column {
                             Text(
-                                text = "Ручной импорт ключа из буфера",
+                                text = "Импорт ключа или списка",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Поддерживаются vless://, hy2://, trojan://, vmess://, ss:// и Base64",
+                                text = "vless://, hy2://, trojan://, vmess://, ss://, Base64, JSON",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -221,10 +260,11 @@ fun SourcesScreen(
                         value = manualKeyText,
                         onValueChange = { manualKeyText = it },
                         placeholder = {
-                            Text("vless://uuid@host:443?security=reality&sni=www.microsoft.com&pbk=...#US-Node")
+                            Text("Вставьте vless://... или Base64-подписку")
                         },
-                        maxLines = 3,
-                        shape = RoundedCornerShape(12.dp),
+                        maxLines = 4,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = glassTextFieldColors,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("manual_key_input")
@@ -232,72 +272,87 @@ fun SourcesScreen(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        OutlinedButton(
+                        LiquidGlassButton(
+                            hazeState = hazeState,
                             onClick = {
                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                 val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
                                 if (clipText.isNotBlank()) {
                                     manualKeyText = clipText
                                     onImportKey(clipText)
-                                } else {
-                                    // Если буфер пуст (например, в эмуляторе), подставляем демонстрационный VLESS Reality ключ
-                                    val sample = "vless://b8a1c2d3-e4f5-4678-9101-112131415161@162.159.136.77:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=mH8x9KpL2qR5vW7yZ0bN3cM6fJ4dG1sT8uV9wX2yZ4A&sid=6ba85179#US-Clipboard-Reality"
-                                    manualKeyText = sample
-                                    onImportKey(sample)
                                 }
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            accentColor = ElectricCyan,
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .defaultMinSize(minHeight = 48.dp)
                                 .testTag("paste_clipboard_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentPaste,
-                                contentDescription = "Из буфера",
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Из буфера")
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentPaste,
+                                    contentDescription = "Из буфера",
+                                    tint = ElectricCyan,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Из буфера",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
 
-                        FilledTonalButton(
+                        LiquidGlassButton(
+                            hazeState = hazeState,
                             onClick = {
                                 if (manualKeyText.isNotBlank()) {
                                     onImportKey(manualKeyText)
                                     manualKeyText = ""
                                 }
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            accentColor = CyberEmerald,
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .defaultMinSize(minHeight = 48.dp)
                                 .testTag("import_key_submit_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Добавить ноду",
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Импортировать")
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Импортировать",
+                                    tint = CyberEmerald,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Импортировать",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 3. Add New Subscription Repository Form
+        // 3. Add New Subscription Repository
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant)
+            LiquidGlassCard(
+                hazeState = hazeState,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -314,11 +369,11 @@ fun SourcesScreen(
                         )
                         Column {
                             Text(
-                                text = "Добавить URL бесплатной подписки",
+                                text = "Добавить URL подписки",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Авто-сбор каждые 3 часа (WorkManager): Base64, Clash YAML, URI-списки",
+                                text = "Авто-сбор каждые 3 часа через WorkManager",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -328,9 +383,10 @@ fun SourcesScreen(
                     OutlinedTextField(
                         value = newSourceTitle,
                         onValueChange = { newSourceTitle = it },
-                        placeholder = { Text("Название (например, GitHub Mirror RU)") },
+                        placeholder = { Text("Название источника") },
                         singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = glassTextFieldColors,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("source_title_input")
@@ -341,13 +397,15 @@ fun SourcesScreen(
                         onValueChange = { newSourceUrl = it },
                         placeholder = { Text("https://raw.githubusercontent.com/.../sub.txt") },
                         singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = glassTextFieldColors,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("source_url_input")
                     )
 
-                    Button(
+                    LiquidGlassButton(
+                        hazeState = hazeState,
                         onClick = {
                             if (newSourceUrl.isNotBlank()) {
                                 onAddSource(newSourceTitle, newSourceUrl)
@@ -355,19 +413,30 @@ fun SourcesScreen(
                                 newSourceUrl = ""
                             }
                         },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = CyberEmerald,
-                            contentColor = Color(0xFF002416)
-                        ),
+                        accentColor = CyberEmerald,
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .defaultMinSize(minHeight = 48.dp)
                             .testTag("add_source_button")
                     ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Добавить источник подписки", fontWeight = FontWeight.Bold)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = null,
+                                tint = CyberEmerald
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Добавить источник подписки",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                 }
             }
@@ -376,21 +445,18 @@ fun SourcesScreen(
         // 4. Active Subscription URLs Header
         item {
             Text(
-                text = "Активные репозитории подписок (${sources.size})",
+                text = "Активные источники подписок (${sources.size})",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
 
         items(sources, key = { it.id }) { source ->
-            SubscriptionSourceRow(
+            SubscriptionSourceGlassRow(
+                hazeState = hazeState,
                 source = source,
                 onDelete = { onRemoveSource(source.id) }
             )
-        }
-
-        item {
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
@@ -420,14 +486,14 @@ private fun WarpKeyValRow(key: String, value: String) {
 }
 
 @Composable
-private fun SubscriptionSourceRow(
+private fun SubscriptionSourceGlassRow(
+    hazeState: HazeState,
     source: SubscriptionSource,
     onDelete: () -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.surfaceVariant),
+    LiquidGlassCard(
+        hazeState = hazeState,
+        shape = RoundedCornerShape(18.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("source_item_${source.id}")
@@ -458,8 +524,8 @@ private fun SubscriptionSourceRow(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = ElectricCyan.copy(alpha = 0.14f)
+                        shape = RoundedCornerShape(6.dp),
+                        color = ElectricCyan.copy(alpha = 0.16f)
                     ) {
                         Text(
                             text = source.formatHint,
@@ -469,8 +535,8 @@ private fun SubscriptionSourceRow(
                         )
                     }
                     Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = SignalAmber.copy(alpha = 0.14f)
+                        shape = RoundedCornerShape(6.dp),
+                        color = SignalAmber.copy(alpha = 0.16f)
                     ) {
                         Text(
                             text = "Нод: ${source.lastNodeCount}",

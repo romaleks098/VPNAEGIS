@@ -8,68 +8,87 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Генератор валидной JSON-конфигурации для ядра sing-box (libbox.aar).
+ * Генератор строго валидной JSON-конфигурации для sing-box 1.12–1.14+ (`net.clever-vpn:libbox-android`).
  *
- * Реализует:
- * 1. Строгое отключение IPv6 (strategy = "ipv4_only") во избежание утечек геопозиции операторов РФ.
- * 2. FakeIP DNS (198.18.0.0/15) + удалённый DoH (https://1.1.1.1/dns-query) строго через активный туннель.
- * 3. Прямой DNS (77.88.8.8) и прямой роутинг для российских доменов (.ru, .рф, .su, Госуслуги, банки).
- * 4. Группу автопереключения urltest (https://www.gstatic.com/generate_204 каждые 180 сек, таймаут 3000 мс).
- * 5. Каскадную цепочку VLESS Reality -> Cloudflare WARP Detour для обхода ТСПУ и чистого IP в Google Gemini.
+ * Ключевые требования актуальной схемы sing-box:
+ * 1. `endpoints` (корневая секция): Cloudflare WARP (`type: "wireguard"`, `system: false`, `mtu: 1280`,
+ *    `detour` на активную входную группу `vless-reality-entry`). Без устаревших полей AmneziaWG.
+ * 2. `inbounds`: TUN `address: ["172.19.0.1/30"]`, `mtu: 1400`, `auto_route: true`, `strict_route: true`, `stack: "gvisor"`.
+ * 3. `dns`: современные типы серверов `fakeip` (`198.18.0.0/15`), `https` (`1.1.1.1`, `detour`), `udp` (`77.88.8.8`), `local`;
+ *    `strategy: "ipv4_only"` для блокировки утечек геолокации через IPv6.
+ * 4. `route.rules`: `{"action": "sniff"}`, `{"protocol": "dns", "action": "hijack-dns"}`, прямые правила
+ *    для приватных IP, `.ru`/`.рф`/банков и IP/доменов самих прокси-серверов (исключение петли маршрутизации),
+ *    блокировка утечного QUIC (UDP 443) для Gemini и строгая маршрутизация Gemini через `warp-exit` (при наличии WARP).
  */
 object SingBoxConfigBuilder {
 
     const val TUN_IPV4_CIDR = "172.19.0.1/30"
     const val FAKE_IP_CIDR = "198.18.0.0/15"
-    const val REMOTE_DOH_URL = "https://1.1.1.1/dns-query"
+    const val REMOTE_DOH_HOST = "1.1.1.1"
     const val URLTEST_URL = "https://www.gstatic.com/generate_204"
-    const val URLTEST_INTERVAL = "3m" // 180 seconds
+    const val URLTEST_INTERVAL = "3m"
 
     fun buildConfig(
         nodes: List<ProxyNode>,
-        warpConfig: WarpConfig,
+        warpConfig: WarpConfig?,
         routingMode: RoutingMode,
         selectedNodeTag: String? = null
     ): String {
-        val activeNodes = nodes.ifEmpty { defaultFallbackNodes() }
+        val usableNodes = nodes.filter { it.server.isNotBlank() && it.serverPort in 1..65535 }
+        require(usableNodes.isNotEmpty()) {
+            "Список серверов пуст. Нажмите «Обновить и протестировать серверы» или импортируйте ключ (vless://, hy2://, trojan://)."
+        }
+
+        val hasValidWarp = warpConfig != null && warpConfig.isRegistered
+        val useWarpChain = routingMode == RoutingMode.VLESS_WARP_CHAIN && hasValidWarp
+
+        val primaryOutboundTag = if (useWarpChain) "warp-exit" else "auto-best-free"
+        val geminiOutboundTag = if (hasValidWarp) "warp-exit" else "auto-best-free"
 
         val root = JSONObject()
 
-        // 1. Log configuration
+        // 1. Log
         root.put(
             "log",
             JSONObject().apply {
                 put("disabled", false)
-                put("level", "warn")
+                put("level", "info")
                 put("timestamp", true)
             }
         )
 
-        val primaryOutboundTag = when (routingMode) {
-            RoutingMode.VLESS_WARP_CHAIN -> "warp-exit"
-            RoutingMode.AUTO_BEST_FREE -> "auto-best-free"
-        }
-
-        // 2. DNS Configuration (FakeIP 198.18.0.0/15 + DoH 1.1.1.1 via Tunnel + ipv4_only)
+        // 2. DNS (sing-box 1.12+ typed servers + FakeIP + ipv4_only)
         root.put("dns", buildDnsSection(primaryOutboundTag))
 
-        // 3. Inbounds (System TUN 172.19.0.1/30 with strict ipv4_only)
+        // 3. Inbounds (sing-box 1.12+ address array)
         root.put("inbounds", buildInboundsSection())
 
-        // 4. Outbounds (Individual nodes + urltest + VLESS -> WARP Detour chain)
+        // 4. Endpoints (Cloudflare WARP WireGuard lives in root endpoints[] since sing-box 1.11+)
+        if (hasValidWarp && warpConfig != null) {
+            root.put("endpoints", buildEndpointsSection(warpConfig))
+        }
+
+        // 5. Outbounds
         root.put(
             "outbounds",
             buildOutboundsSection(
-                nodes = activeNodes,
-                warpConfig = warpConfig,
+                nodes = usableNodes,
                 selectedNodeTag = selectedNodeTag
             )
         )
 
-        // 5. Route rules (Gemini via WARP Chain, RU domains Direct, FakeIP & Private IP handling)
-        root.put("route", buildRouteSection(primaryOutboundTag))
+        // 6. Route (actions: sniff, hijack-dns, reject + loop prevention + Gemini WARP Chain + RU direct)
+        root.put(
+            "route",
+            buildRouteSection(
+                nodes = usableNodes,
+                warpConfig = if (hasValidWarp) warpConfig else null,
+                primaryOutboundTag = primaryOutboundTag,
+                geminiOutboundTag = geminiOutboundTag
+            )
+        )
 
-        // 6. Experimental cache file for FakeIP persistence across network handoffs
+        // 7. Experimental cache_file for FakeIP state
         root.put(
             "experimental",
             JSONObject().apply {
@@ -88,13 +107,14 @@ object SingBoxConfigBuilder {
 
     private fun buildDnsSection(primaryOutboundTag: String): JSONObject {
         val servers = JSONArray().apply {
-            // Remote DoH strictly through the encrypted proxy outbound
+            // Remote DoH via active tunnel (using IP 1.1.1.1 so no extra domain_resolver needed for DoH host)
             put(
                 JSONObject().apply {
                     put("tag", "dns-remote")
-                    put("address", REMOTE_DOH_URL)
-                    put("address_resolver", "dns-bootstrap")
-                    put("strategy", "ipv4_only")
+                    put("type", "https")
+                    put("server", REMOTE_DOH_HOST)
+                    put("server_port", 443)
+                    put("path", "/dns-query")
                     put("detour", primaryOutboundTag)
                 }
             )
@@ -102,45 +122,30 @@ object SingBoxConfigBuilder {
             put(
                 JSONObject().apply {
                     put("tag", "dns-direct")
-                    put("address", "77.88.8.8")
-                    put("strategy", "ipv4_only")
-                    put("detour", "direct")
+                    put("type", "udp")
+                    put("server", "77.88.8.8")
+                    put("server_port", 53)
                 }
             )
-            // Bootstrap resolver for DoH endpoint IP
+            // System local resolver fallback
             put(
                 JSONObject().apply {
-                    put("tag", "dns-bootstrap")
-                    put("address", "1.1.1.1")
-                    put("strategy", "ipv4_only")
-                    put("detour", "direct")
+                    put("tag", "dns-local")
+                    put("type", "local")
                 }
             )
             // FakeIP virtual DNS server
             put(
                 JSONObject().apply {
                     put("tag", "dns-fakeip")
-                    put("address", "fakeip")
-                }
-            )
-            // Block server
-            put(
-                JSONObject().apply {
-                    put("tag", "dns-block")
-                    put("address", "rcode://success")
+                    put("type", "fakeip")
+                    put("inet4_range", FAKE_IP_CIDR)
                 }
             )
         }
 
         val rules = JSONArray().apply {
-            // Outbound server hostname resolution uses bootstrap/direct
-            put(
-                JSONObject().apply {
-                    put("outbound", JSONArray().put("any"))
-                    put("server", "dns-bootstrap")
-                }
-            )
-            // Russian domains resolve directly without FakeIP pollution
+            // Russian domains resolve directly without FakeIP
             put(
                 JSONObject().apply {
                     put(
@@ -150,24 +155,30 @@ object SingBoxConfigBuilder {
                             put(".su")
                             put(".xn--p1ai")
                             put("gosuslugi.ru")
+                            put("gu-st.ru")
                             put("sberbank.ru")
+                            put("sber.ru")
                             put("tbank.ru")
                             put("tinkoff.ru")
+                            put("vtb.ru")
+                            put("alfabank.ru")
                             put("yandex.ru")
+                            put("yandex.net")
                             put("vk.com")
                             put("ozon.ru")
                             put("wildberries.ru")
                         }
                     )
+                    put("action", "route")
                     put("server", "dns-direct")
                 }
             )
-            // A / AAAA queries get instant FakeIP from 198.18.0.0/15 and resolve remotely inside tunnel
+            // A / AAAA queries receive instant FakeIP from 198.18.0.0/15
             put(
                 JSONObject().apply {
                     put("query_type", JSONArray().put("A").put("AAAA"))
+                    put("action", "route")
                     put("server", "dns-fakeip")
-                    put("rewrite_ttl", 1)
                 }
             )
         }
@@ -175,13 +186,6 @@ object SingBoxConfigBuilder {
         return JSONObject().apply {
             put("servers", servers)
             put("rules", rules)
-            put(
-                "fakeip",
-                JSONObject().apply {
-                    put("enabled", true)
-                    put("inet4_range", FAKE_IP_CIDR)
-                }
-            )
             put("final", "dns-remote")
             put("strategy", "ipv4_only")
             put("independent_cache", true)
@@ -193,223 +197,209 @@ object SingBoxConfigBuilder {
             put("type", "tun")
             put("tag", "tun-in")
             put("interface_name", "tun0")
-            put("inet4_address", TUN_IPV4_CIDR)
+            put("address", JSONArray().put(TUN_IPV4_CIDR))
             put("mtu", 1400)
             put("auto_route", true)
             put("strict_route", true)
             put("stack", "gvisor")
-            put("sniff", true)
-            put("sniff_override_destination", true)
-            put("domain_strategy", "ipv4_only")
         }
         return JSONArray().put(tunInbound)
     }
 
+    private fun buildEndpointsSection(warpConfig: WarpConfig): JSONArray {
+        val addresses = JSONArray().apply {
+            put(warpConfig.localAddressIpv4)
+        }
+
+        val peer = JSONObject().apply {
+            put("address", warpConfig.endpointHost)
+            put("port", warpConfig.endpointPort)
+            put("public_key", warpConfig.peerPublicKey)
+            put("allowed_ips", JSONArray().put("0.0.0.0/0"))
+            if (warpConfig.reservedBytes.size == 3) {
+                put(
+                    "reserved",
+                    JSONArray().apply {
+                        warpConfig.reservedBytes.forEach { put(it) }
+                    }
+                )
+            }
+        }
+
+        val warpEndpoint = JSONObject().apply {
+            put("type", "wireguard")
+            put("tag", "warp-exit")
+            put("system", false)
+            put("mtu", 1280)
+            put("address", addresses)
+            put("private_key", warpConfig.privateKey)
+            put("peers", JSONArray().put(peer))
+            // Detour WireGuard packets through the active VLESS Reality / proxy group
+            put("detour", "vless-reality-entry")
+        }
+
+        return JSONArray().put(warpEndpoint)
+    }
+
     private fun buildOutboundsSection(
         nodes: List<ProxyNode>,
-        warpConfig: WarpConfig,
         selectedNodeTag: String?
     ): JSONArray {
         val outbounds = JSONArray()
-        val allNodeTags = mutableListOf<String>()
-        val realityEntryTags = mutableListOf<String>()
+        val allTags = mutableListOf<String>()
+        val entryCandidateTags = mutableListOf<String>()
 
         for (node in nodes) {
-            val outboundJson = nodeToOutboundJson(node)
-            outbounds.put(outboundJson)
-            allNodeTags.add(node.tag)
-            if (node.protocol == ProxyProtocol.VLESS_REALITY ||
-                node.protocol == ProxyProtocol.HYSTERIA2 ||
-                node.protocol == ProxyProtocol.VLESS_WS_TLS ||
-                node.protocol == ProxyProtocol.VLESS_GRPC
-            ) {
-                realityEntryTags.add(node.tag)
+            val ob = nodeToOutboundJson(node) ?: continue
+            outbounds.put(ob)
+            allTags.add(node.tag)
+            if (node.protocol != ProxyProtocol.SHADOWSOCKS) {
+                entryCandidateTags.add(node.tag)
             }
         }
 
-        if (realityEntryTags.isEmpty() && allNodeTags.isNotEmpty()) {
-            realityEntryTags.addAll(allNodeTags)
+        if (entryCandidateTags.isEmpty()) {
+            entryCandidateTags.addAll(allTags)
         }
 
-        // 1. Entry outbound for TSPU/DPI bypass (vless-reality-entry)
-        // If user pinned a specific node, prioritize it, otherwise use urltest across obfuscated nodes
-        val vlessEntryGroup = JSONObject().apply {
-            put("type", "urltest")
-            put("tag", "vless-reality-entry")
-            val tagsArray = JSONArray()
-            if (selectedNodeTag != null && allNodeTags.contains(selectedNodeTag)) {
-                tagsArray.put(selectedNodeTag)
-            } else {
-                realityEntryTags.forEach { tagsArray.put(it) }
+        // Priority order: selected node first if provided
+        val orderedTags = if (selectedNodeTag != null && allTags.contains(selectedNodeTag)) {
+            listOf(selectedNodeTag) + allTags.filter { it != selectedNodeTag }
+        } else {
+            allTags
+        }
+
+        val orderedEntryTags = if (selectedNodeTag != null && entryCandidateTags.contains(selectedNodeTag)) {
+            listOf(selectedNodeTag) + entryCandidateTags.filter { it != selectedNodeTag }
+        } else {
+            entryCandidateTags
+        }
+
+        // Entry selector/urltest used as detour upstream for WARP endpoint
+        outbounds.put(
+            JSONObject().apply {
+                put("type", "urltest")
+                put("tag", "vless-reality-entry")
+                put("outbounds", JSONArray(orderedEntryTags))
+                put("url", URLTEST_URL)
+                put("interval", URLTEST_INTERVAL)
+                put("tolerance", 50)
+                put("idle_timeout", "30m")
+                put("interrupt_exist_connections", false)
             }
-            put("outbounds", tagsArray)
-            put("url", URLTEST_URL)
-            put("interval", URLTEST_INTERVAL)
-            put("tolerance", 50)
-            put("idle_timeout", "30m")
-            put("interrupt_exist_connections", false)
-        }
-        outbounds.put(vlessEntryGroup)
+        )
 
-        // 2. Smart Cascade Chain for Google Gemini: VLESS Reality -> Cloudflare WARP Detour
-        val warpExitOutbound = JSONObject().apply {
-            put("type", "wireguard")
-            put("tag", "warp-exit")
-            put("server", warpConfig.endpointHost)
-            put("server_port", warpConfig.endpointPort)
-            put("system_interface", false)
-            put(
-                "local_address",
-                JSONArray().apply {
-                    put(warpConfig.localAddressIpv4)
-                }
-            )
-            put("private_key", warpConfig.privateKey)
-            put("peer_public_key", warpConfig.peerPublicKey)
-            put(
-                "reserved",
-                JSONArray().apply {
-                    warpConfig.reservedBytes.forEach { put(it) }
-                }
-            )
-            put("mtu", warpConfig.mtu)
-            put("domain_strategy", "ipv4_only")
-            // CRITICAL: Detour through VLESS Reality entry node to bypass Russian TSPU DPI
-            // while exiting to Google Gemini with a clean Cloudflare WARP IP
-            put("detour", "vless-reality-entry")
-            // AmneziaWG packet header obfuscation metadata
-            put(
-                "amnezia",
-                JSONObject().apply {
-                    put("jc", warpConfig.awgJc)
-                    put("jmin", warpConfig.awgJmin)
-                    put("jmax", warpConfig.awgJmax)
-                    put("s1", warpConfig.awgS1)
-                    put("s2", warpConfig.awgS2)
-                    put("h1", warpConfig.awgH1)
-                    put("h2", warpConfig.awgH2)
-                    put("h3", warpConfig.awgH3)
-                    put("h4", warpConfig.awgH4)
-                }
-            )
-        }
-        outbounds.put(warpExitOutbound)
-
-        // 3. Load balancer & seamless failover group (urltest every 180s, timeout 3000ms)
-        val autoBestFreeGroup = JSONObject().apply {
-            put("type", "urltest")
-            put("tag", "auto-best-free")
-            val tagsArray = JSONArray()
-            if (selectedNodeTag != null && allNodeTags.contains(selectedNodeTag)) {
-                tagsArray.put(selectedNodeTag)
+        // General auto-best-free urltest group
+        outbounds.put(
+            JSONObject().apply {
+                put("type", "urltest")
+                put("tag", "auto-best-free")
+                put("outbounds", JSONArray(orderedTags))
+                put("url", URLTEST_URL)
+                put("interval", URLTEST_INTERVAL)
+                put("tolerance", 50)
+                put("idle_timeout", "30m")
+                put("interrupt_exist_connections", false)
             }
-            allNodeTags.forEach { tag ->
-                if (tag != selectedNodeTag) tagsArray.put(tag)
-            }
-            put("outbounds", tagsArray)
-            put("url", URLTEST_URL)
-            put("interval", URLTEST_INTERVAL)
-            put("tolerance", 50)
-            put("idle_timeout", "30m")
-            put("interrupt_exist_connections", false)
-        }
-        outbounds.put(autoBestFreeGroup)
+        )
 
-        // 4. Standard system outbounds
         outbounds.put(
             JSONObject().apply {
                 put("type", "direct")
                 put("tag", "direct")
-                put("domain_strategy", "ipv4_only")
-            }
-        )
-        outbounds.put(
-            JSONObject().apply {
-                put("type", "block")
-                put("tag", "block")
-            }
-        )
-        outbounds.put(
-            JSONObject().apply {
-                put("type", "dns")
-                put("tag", "dns-out")
             }
         )
 
         return outbounds
     }
 
-    private fun nodeToOutboundJson(node: ProxyNode): JSONObject {
+    private fun nodeToOutboundJson(node: ProxyNode): JSONObject? {
         return when (node.protocol) {
-            ProxyProtocol.VLESS_REALITY -> JSONObject().apply {
-                put("type", "vless")
-                put("tag", node.tag)
-                put("server", node.server)
-                put("server_port", node.serverPort)
-                put("uuid", node.uuidOrPassword)
-                put("flow", node.flow.ifEmpty { "xtls-rprx-vision" })
-                put("domain_strategy", "ipv4_only")
-                put("packet_encoding", "xudp")
-                put(
-                    "tls",
-                    JSONObject().apply {
-                        put("enabled", true)
-                        put("server_name", node.sni)
-                        put(
-                            "utls",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("fingerprint", node.fingerprint.ifEmpty { "chrome" })
-                            }
-                        )
-                        put(
-                            "reality",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("public_key", node.publicKey)
-                                put("short_id", node.shortId)
-                            }
-                        )
+            ProxyProtocol.VLESS_REALITY -> {
+                if (node.publicKey.isBlank()) return null
+                JSONObject().apply {
+                    put("type", "vless")
+                    put("tag", node.tag)
+                    put("server", node.server)
+                    put("server_port", node.serverPort)
+                    put("uuid", node.uuidOrPassword)
+                    if (node.flow.isNotBlank()) {
+                        put("flow", node.flow)
                     }
-                )
+                    put("packet_encoding", "xudp")
+                    put(
+                        "tls",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("server_name", node.sni.ifBlank { "www.microsoft.com" })
+                            put(
+                                "utls",
+                                JSONObject().apply {
+                                    put("enabled", true)
+                                    put("fingerprint", node.fingerprint.ifBlank { "chrome" })
+                                }
+                            )
+                            put(
+                                "reality",
+                                JSONObject().apply {
+                                    put("enabled", true)
+                                    put("public_key", node.publicKey)
+                                    if (node.shortId.isNotBlank()) {
+                                        put("short_id", node.shortId)
+                                    }
+                                }
+                            )
+                        }
+                    )
+                }
             }
 
-            ProxyProtocol.VLESS_WS_TLS, ProxyProtocol.VLESS_GRPC -> JSONObject().apply {
+            ProxyProtocol.VLESS_WS_TLS, ProxyProtocol.VLESS_GRPC, ProxyProtocol.VLESS_XHTTP -> JSONObject().apply {
                 put("type", "vless")
                 put("tag", node.tag)
                 put("server", node.server)
                 put("server_port", node.serverPort)
                 put("uuid", node.uuidOrPassword)
-                put("domain_strategy", "ipv4_only")
-                put(
-                    "tls",
-                    JSONObject().apply {
-                        put("enabled", true)
-                        put("server_name", node.sni)
-                        put(
-                            "utls",
-                            JSONObject().apply {
-                                put("enabled", true)
-                                put("fingerprint", node.fingerprint.ifEmpty { "chrome" })
-                            }
-                        )
-                    }
-                )
+                put("packet_encoding", "xudp")
+                if (node.tlsEnabled) {
+                    put(
+                        "tls",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("server_name", node.sni.ifBlank { node.server })
+                            put(
+                                "utls",
+                                JSONObject().apply {
+                                    put("enabled", true)
+                                    put("fingerprint", node.fingerprint.ifBlank { "chrome" })
+                                }
+                            )
+                        }
+                    )
+                }
                 put(
                     "transport",
                     JSONObject().apply {
-                        if (node.protocol == ProxyProtocol.VLESS_GRPC) {
-                            put("type", "grpc")
-                            put("service_name", node.transportPath.ifEmpty { "grpc" })
-                        } else {
-                            put("type", "ws")
-                            put("path", node.transportPath.ifEmpty { "/" })
-                            put(
-                                "headers",
-                                JSONObject().apply {
-                                    put("Host", node.sni)
-                                }
-                            )
+                        when (node.protocol) {
+                            ProxyProtocol.VLESS_GRPC -> {
+                                put("type", "grpc")
+                                put("service_name", node.transportPath.ifBlank { "grpc" })
+                            }
+                            ProxyProtocol.VLESS_XHTTP -> {
+                                put("type", "httpupgrade")
+                                put("host", node.sni.ifBlank { node.server })
+                                put("path", node.transportPath.ifBlank { "/" })
+                            }
+                            else -> {
+                                put("type", "ws")
+                                put("path", node.transportPath.ifBlank { "/" })
+                                put(
+                                    "headers",
+                                    JSONObject().apply {
+                                        put("Host", node.sni.ifBlank { node.server })
+                                    }
+                                )
+                            }
                         }
                     }
                 )
@@ -423,7 +413,6 @@ object SingBoxConfigBuilder {
                 put("password", node.uuidOrPassword)
                 put("up_mbps", node.upMbps)
                 put("down_mbps", node.downMbps)
-                put("domain_strategy", "ipv4_only")
                 if (node.obfsPassword.isNotBlank()) {
                     put(
                         "obfs",
@@ -437,7 +426,7 @@ object SingBoxConfigBuilder {
                     "tls",
                     JSONObject().apply {
                         put("enabled", true)
-                        put("server_name", node.sni)
+                        put("server_name", node.sni.ifBlank { node.server })
                         put("alpn", JSONArray().put("h3"))
                     }
                 )
@@ -449,17 +438,16 @@ object SingBoxConfigBuilder {
                 put("server", node.server)
                 put("server_port", node.serverPort)
                 put("password", node.uuidOrPassword)
-                put("domain_strategy", "ipv4_only")
                 put(
                     "tls",
                     JSONObject().apply {
                         put("enabled", true)
-                        put("server_name", node.sni)
+                        put("server_name", node.sni.ifBlank { node.server })
                         put(
                             "utls",
                             JSONObject().apply {
                                 put("enabled", true)
-                                put("fingerprint", "chrome")
+                                put("fingerprint", node.fingerprint.ifBlank { "chrome" })
                             }
                         )
                     }
@@ -474,46 +462,91 @@ object SingBoxConfigBuilder {
                 put("uuid", node.uuidOrPassword)
                 put("security", "auto")
                 put("alter_id", 0)
-                put("domain_strategy", "ipv4_only")
-                put(
-                    "tls",
-                    JSONObject().apply {
-                        put("enabled", true)
-                        put("server_name", node.sni)
-                    }
-                )
+                if (node.tlsEnabled) {
+                    put(
+                        "tls",
+                        JSONObject().apply {
+                            put("enabled", true)
+                            put("server_name", node.sni.ifBlank { node.server })
+                        }
+                    )
+                }
+                if (node.transportType == "ws") {
+                    put(
+                        "transport",
+                        JSONObject().apply {
+                            put("type", "ws")
+                            put("path", node.transportPath.ifBlank { "/" })
+                            put(
+                                "headers",
+                                JSONObject().apply {
+                                    put("Host", node.sni.ifBlank { node.server })
+                                }
+                            )
+                        }
+                    )
+                }
             }
 
-            ProxyProtocol.SHADOWSOCKS, ProxyProtocol.WIREGUARD_WARP -> JSONObject().apply {
+            ProxyProtocol.SHADOWSOCKS -> JSONObject().apply {
                 put("type", "shadowsocks")
                 put("tag", node.tag)
                 put("server", node.server)
                 put("server_port", node.serverPort)
-                put("method", node.method.ifEmpty { "2022-blake3-aes-128-gcm" })
+                put("method", node.method.ifBlank { "2022-blake3-aes-128-gcm" })
                 put("password", node.uuidOrPassword)
-                put("domain_strategy", "ipv4_only")
             }
         }
     }
 
-    private fun buildRouteSection(primaryOutboundTag: String): JSONObject {
+    private fun buildRouteSection(
+        nodes: List<ProxyNode>,
+        warpConfig: WarpConfig?,
+        primaryOutboundTag: String,
+        geminiOutboundTag: String
+    ): JSONObject {
         val rules = JSONArray().apply {
-            // 1. Intercept DNS traffic
+            // 1. Sniff incoming TCP/UDP streams (sing-box 1.11+ rule action)
+            put(JSONObject().apply { put("action", "sniff") })
+
+            // 2. Hijack DNS traffic into sing-box DNS module
             put(
                 JSONObject().apply {
                     put("protocol", "dns")
-                    put("outbound", "dns-out")
+                    put("action", "hijack-dns")
                 }
             )
-            // 2. Block QUIC on non-Hysteria outbounds only if needed for WebRTC/UDP stability,
-            // while keeping UDP open for Telegram voice/video calls.
+
+            // 3. Private IPs direct
             put(
                 JSONObject().apply {
                     put("ip_is_private", true)
                     put("outbound", "direct")
                 }
             )
-            // 3. Russian services (Banks, Gosuslugi, Marketplaces, .ru/.рф) -> ALWAYS DIRECT
+
+            // 4. Prevent routing loops: proxy server domains/IPs and WARP endpoint must bypass TUN when dialed
+            val serverDomains = nodes.map { it.server }.filter { !isIpAddress(it) }.distinct()
+            val serverIps = buildList {
+                nodes.map { it.server }.filter { isIpAddress(it) }.forEach { add(if (it.contains("/")) it else "$it/32") }
+                warpConfig?.endpointHost?.takeIf { isIpAddress(it) }?.let { add("$it/32") }
+            }.distinct()
+
+            if (serverDomains.isNotEmpty() || serverIps.isNotEmpty()) {
+                put(
+                    JSONObject().apply {
+                        if (serverDomains.isNotEmpty()) {
+                            put("domain", JSONArray(serverDomains))
+                        }
+                        if (serverIps.isNotEmpty()) {
+                            put("ip_cidr", JSONArray(serverIps))
+                        }
+                        put("outbound", "direct")
+                    }
+                )
+            }
+
+            // 5. Russian services (Banks, Gosuslugi, Marketplaces, .ru/.рф) -> DIRECT
             put(
                 JSONObject().apply {
                     put(
@@ -532,7 +565,6 @@ object SingBoxConfigBuilder {
                             put("alfabank.ru")
                             put("nalog.ru")
                             put("mos.ru")
-                            put("emiass.info")
                             put("wildberries.ru")
                             put("wb.ru")
                             put("ozon.ru")
@@ -540,7 +572,6 @@ object SingBoxConfigBuilder {
                             put("yandex.net")
                             put("ya.ru")
                             put("vk.com")
-                            put("vkuseraudio.net")
                             put("userapi.com")
                             put("dzen.ru")
                             put("avito.ru")
@@ -552,32 +583,42 @@ object SingBoxConfigBuilder {
                     put("outbound", "direct")
                 }
             )
-            // 4. Google Gemini, AI Studio, Assistant & AI endpoints -> ALWAYS via VLESS -> WARP Detour Chain
-            // to guarantee clean Cloudflare residential/anycast IP without "Country not supported"
+
+            val geminiDomains = JSONArray().apply {
+                put("gemini.google.com")
+                put("bard.google.com")
+                put("aistudio.google.com")
+                put("makersuite.google.com")
+                put("generativelanguage.googleapis.com")
+                put("proactivebackend-pa.googleapis.com")
+                put("alkalimakersuite-pa.clients6.google.com")
+                put("aisandbox-pa.googleapis.com")
+                put("robinfrontend-pa.googleapis.com")
+                put("assistant-s3-pa.googleapis.com")
+                put("openai.com")
+                put("chatgpt.com")
+                put("claude.ai")
+            }
+
+            // 6. Reject UDP/443 (QUIC) on Gemini AI domains so Chrome/Android falls back to TCP TLS inside VLESS->WARP (prevents MTU/UDP leaks)
             put(
                 JSONObject().apply {
-                    put(
-                        "domain_suffix",
-                        JSONArray().apply {
-                            put("gemini.google.com")
-                            put("bard.google.com")
-                            put("aistudio.google.com")
-                            put("makersuite.google.com")
-                            put("generativelanguage.googleapis.com")
-                            put("proactivebackend-pa.googleapis.com")
-                            put("alkalimakersuite-pa.clients6.google.com")
-                            put("aisandbox-pa.googleapis.com")
-                            put("robinfrontend-pa.googleapis.com")
-                            put(" assistant-s3-pa.googleapis.com".trim())
-                            put("openai.com")
-                            put("chatgpt.com")
-                            put("claude.ai")
-                        }
-                    )
-                    put("outbound", "warp-exit")
+                    put("network", "udp")
+                    put("port", 443)
+                    put("domain_suffix", geminiDomains)
+                    put("action", "reject")
                 }
             )
-            // 5. YouTube 1080p/4K high-bitrate streaming domains -> primary outbound
+
+            // 7. Google Gemini & AI services -> WARP -> VLESS cascade chain
+            put(
+                JSONObject().apply {
+                    put("domain_suffix", geminiDomains)
+                    put("outbound", geminiOutboundTag)
+                }
+            )
+
+            // 8. YouTube 1080p/4K streaming
             put(
                 JSONObject().apply {
                     put(
@@ -589,13 +630,13 @@ object SingBoxConfigBuilder {
                             put("youtu.be")
                             put("ggpht.com")
                             put("youtubei.googleapis.com")
-                            put("widevine.com")
                         }
                     )
                     put("outbound", primaryOutboundTag)
                 }
             )
-            // 6. Telegram messages, voice/video calls & media DCs -> primary outbound
+
+            // 9. Telegram messages, voice/video calls & media DCs
             put(
                 JSONObject().apply {
                     put(
@@ -627,6 +668,7 @@ object SingBoxConfigBuilder {
         }
 
         return JSONObject().apply {
+            put("default_domain_resolver", "dns-direct")
             put("auto_detect_interface", true)
             put("override_android_vpn", true)
             put("final", primaryOutboundTag)
@@ -634,94 +676,8 @@ object SingBoxConfigBuilder {
         }
     }
 
-    fun defaultFallbackNodes(): List<ProxyNode> = listOf(
-        ProxyNode(
-            id = "node-us-reality-1",
-            tag = "us-ashburn-reality-01",
-            name = "US Ashburn • Reality Vision",
-            protocol = ProxyProtocol.VLESS_REALITY,
-            server = "162.159.135.42",
-            serverPort = 443,
-            countryCode = "US",
-            countryName = "США (Вирджиния)",
-            uuidOrPassword = "9f8e7d6c-5b4a-4321-8765-1a2b3c4d5e6f",
-            sni = "www.microsoft.com",
-            publicKey = "mH8x9KpL2qR5vW7yZ0bN3cM6fJ4dG1sT8uV9wX2yZ4A",
-            shortId = "6ba85179e30d4fc2",
-            flow = "xtls-rprx-vision",
-            fingerprint = "chrome",
-            latencyMs = 68,
-            geminiCompatible = true
-        ),
-        ProxyNode(
-            id = "node-de-reality-2",
-            tag = "de-frankfurt-reality-02",
-            name = "DE Frankfurt • Reality Vision",
-            protocol = ProxyProtocol.VLESS_REALITY,
-            server = "104.16.132.229",
-            serverPort = 443,
-            countryCode = "DE",
-            countryName = "Германия (Франкфурт)",
-            uuidOrPassword = "4a3b2c1d-9e8f-4765-a1b2-c3d4e5f60718",
-            sni = "dl.google.com",
-            publicKey = "qP4nL9vK1xM7zR3wT6yB8cF2hJ5gD0sA9eW4rU7iO1E",
-            shortId = "a1b2c3d4",
-            flow = "xtls-rprx-vision",
-            fingerprint = "chrome",
-            latencyMs = 42,
-            geminiCompatible = true
-        ),
-        ProxyNode(
-            id = "node-nl-hy2-3",
-            tag = "nl-amsterdam-hy2-03",
-            name = "NL Amsterdam • Hysteria2 QUIC",
-            protocol = ProxyProtocol.HYSTERIA2,
-            server = "188.114.96.3",
-            serverPort = 8443,
-            countryCode = "NL",
-            countryName = "Нидерланды (Амстердам)",
-            uuidOrPassword = "hy2-amsterdam-4k-stream-token",
-            sni = "www.cloudflare.com",
-            obfsPassword = "salamander-dpi-bypass-ru",
-            upMbps = 150,
-            downMbps = 400,
-            latencyMs = 47,
-            geminiCompatible = true
-        ),
-        ProxyNode(
-            id = "node-fi-reality-4",
-            tag = "fi-helsinki-reality-04",
-            name = "FI Helsinki • Reality Vision",
-            protocol = ProxyProtocol.VLESS_REALITY,
-            server = "172.67.74.226",
-            serverPort = 443,
-            countryCode = "FI",
-            countryName = "Финляндия (Хельсинки)",
-            uuidOrPassword = "7c6d5e4f-3a2b-4109-9876-5f4e3d2c1b0a",
-            sni = "addons.mozilla.org",
-            publicKey = "kL9mN2pQ5rS8tU1vW4xY7zA0bC3dE6fG9hI2jK5lM8N",
-            shortId = "90f1e2d3",
-            flow = "xtls-rprx-vision",
-            fingerprint = "chrome",
-            latencyMs = 31,
-            geminiCompatible = true
-        ),
-        ProxyNode(
-            id = "node-us-grpc-5",
-            tag = "us-newyork-grpc-05",
-            name = "US New York • VLESS gRPC+TLS",
-            protocol = ProxyProtocol.VLESS_GRPC,
-            server = "104.21.48.84",
-            serverPort = 443,
-            countryCode = "US",
-            countryName = "США (Нью-Йорк)",
-            uuidOrPassword = "1f2e3d4c-5b6a-4789-8012-3c4d5e6f7a8b",
-            sni = "cdn.cloudflare.net",
-            transportType = "grpc",
-            transportPath = "gemini-grpc-tunnel",
-            fingerprint = "chrome",
-            latencyMs = 79,
-            geminiCompatible = true
-        )
-    )
+    private fun isIpAddress(host: String): Boolean {
+        val ipv4Regex = Regex("""^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$""")
+        return ipv4Regex.matches(host.trim()) || host.contains(":")
+    }
 }

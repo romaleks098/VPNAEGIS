@@ -29,17 +29,16 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Download official sing-box libbox.aar (if not committed in app/libs)
+      - name: Verify libbox Maven dependency or fallback AAR
         run: |
-          mkdir -p app/libs
-          if [ ! -f "app/libs/libbox.aar" ]; then
-            echo "Checking latest sing-box Android libbox.aar archive..."
-            if ! curl -fsSL --retry 3 \
+          if grep -q "libbox" app/build.gradle.kts; then
+            echo "Using Maven libbox dependency declared in app/build.gradle.kts (skipping manual AAR download)."
+            rm -f app/libs/libbox.aar
+          elif [ ! -f "app/libs/libbox.aar" ]; then
+            mkdir -p app/libs
+            curl -fsSL --retry 3 \
               "https://github.com/SagerNet/sing-box/releases/latest/download/libbox.aar" \
-              -o app/libs/libbox.aar; then
-              rm -f app/libs/libbox.aar
-              echo "libbox.aar not directly attached in latest release; using built-in LibboxBridge."
-            fi
+              -o app/libs/libbox.aar || rm -f app/libs/libbox.aar
           fi
 
       - name: Prepare Release Keystore

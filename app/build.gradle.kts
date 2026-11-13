@@ -94,8 +94,10 @@ secrets {
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
 dependencies {
-  // Local sing-box core library (app/libs/libbox.aar)
+  // Official prebuilt sing-box libbox AAR + local override if present in app/libs
   implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+  implementation(libs.libbox.android)
+  implementation(libs.haze)
 
   implementation(platform(libs.androidx.compose.bom))
   // implementation(platform(libs.firebase.bom))

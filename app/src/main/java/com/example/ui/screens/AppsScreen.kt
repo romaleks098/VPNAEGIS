@@ -7,7 +7,6 @@ import android.graphics.drawable.Drawable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,8 +30,6 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.VideoLibrary
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.FilterChip
@@ -42,7 +38,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,22 +52,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.AppRoutingItem
+import com.example.ui.components.LiquidGlassCard
 import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.SignalAmber
 import com.example.ui.theme.WarpViolet
+import dev.chrisbanes.haze.HazeState
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppsScreen(
+    hazeState: HazeState,
     apps: List<AppRoutingItem>,
     whitelistedPackages: Set<String>,
+    includeGmsDependencies: Boolean,
+    onToggleGmsDependencies: (Boolean) -> Unit,
     onToggleApp: (String, Boolean) -> Unit,
     onResetDefaults: () -> Unit,
     modifier: Modifier = Modifier
@@ -97,22 +102,19 @@ fun AppsScreen(
         modifier = modifier
             .fillMaxSize()
             .testTag("apps_screen_list"),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 118.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. Header explanation card (Per-App Whitelist via VpnService.Builder.addAllowedApplication)
+        // 1. Header Liquid Glass Card + GMS / WebView System Dependencies Toggle
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.3f))
+            LiquidGlassCard(
+                hazeState = hazeState,
+                accentGlowColor = ElectricCyan,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -121,11 +123,11 @@ fun AppsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Поприложенческий Белый список",
+                                text = "Белый список маршрутов",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "VpnService.Builder.addAllowedApplication()",
+                                text = "Только addAllowedApplication() • ${whitelistedPackages.size} прил.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = ElectricCyan
                             )
@@ -137,23 +139,65 @@ fun AppsScreen(
                             Icon(
                                 imageVector = Icons.Default.Restore,
                                 contentDescription = "Сбросить по умолчанию",
+                                tint = ElectricCyan,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.size(4.dp))
-                            Text("Сброс")
+                            Text("Сброс", color = ElectricCyan)
                         }
                     }
 
                     Text(
-                        text = "В VPN-туннель попадают только отмеченные приложения (${whitelistedPackages.size} шт.). Российские банки, Госуслуги, маркетплейсы и системные сервисы идут напрямую мимо TUN-интерфейса.",
+                        text = "В TUN попадают только отмеченные приложения. Банки РФ, Госуслуги и маркетплейсы идут напрямую мимо VPN.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color.White.copy(alpha = 0.06f),
+                        border = BorderStroke(1.dp, (if (includeGmsDependencies) CyberEmerald else Color.White).copy(alpha = 0.25f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "Системные зависимости (GMS / WebView)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Добавляет Google Play Services, GSF и WebView для корректной авторизации в Gemini и YouTube",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = includeGmsDependencies,
+                                onCheckedChange = onToggleGmsDependencies,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFF002416),
+                                    checkedTrackColor = CyberEmerald
+                                ),
+                                modifier = Modifier.testTag("gms_dependencies_switch")
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // 2. Search Bar
+        // 2. Glass Search Bar
         item {
             OutlinedTextField(
                 value = searchQuery,
@@ -176,7 +220,13 @@ fun AppsScreen(
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.White.copy(alpha = 0.08f),
+                    unfocusedContainerColor = Color.White.copy(alpha = 0.05f),
+                    focusedBorderColor = ElectricCyan,
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.16f)
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("search_apps_input")
@@ -196,7 +246,8 @@ fun AppsScreen(
                         onClick = { selectedCategory = category },
                         label = { Text(category) },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = ElectricCyan.copy(alpha = 0.2f),
+                            containerColor = Color.White.copy(alpha = 0.05f),
+                            selectedContainerColor = ElectricCyan.copy(alpha = 0.22f),
                             selectedLabelColor = ElectricCyan
                         )
                     )
@@ -207,21 +258,19 @@ fun AppsScreen(
         // 4. App Items
         items(filteredApps, key = { it.packageName }) { app ->
             val isChecked = whitelistedPackages.contains(app.packageName)
-            AppWhitelistRow(
+            AppWhitelistGlassRow(
+                hazeState = hazeState,
                 item = app,
                 isChecked = isChecked,
                 onCheckedChange = { enabled -> onToggleApp(app.packageName, enabled) }
             )
         }
-
-        item {
-            Spacer(modifier = Modifier.height(16.dp))
-        }
     }
 }
 
 @Composable
-private fun AppWhitelistRow(
+private fun AppWhitelistGlassRow(
+    hazeState: HazeState,
     item: AppRoutingItem,
     isChecked: Boolean,
     onCheckedChange: (Boolean) -> Unit
@@ -244,21 +293,13 @@ private fun AppWhitelistRow(
         else -> SignalAmber
     }
 
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (isChecked) {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-        } else {
-            MaterialTheme.colorScheme.surface
-        },
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (isChecked) ElectricCyan.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surfaceVariant
-        ),
+    LiquidGlassCard(
+        hazeState = hazeState,
+        accentGlowColor = if (isChecked) ElectricCyan else null,
+        shape = RoundedCornerShape(18.dp),
+        onClick = { onCheckedChange(!isChecked) },
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .clickable { onCheckedChange(!isChecked) }
             .testTag("app_row_${item.packageName}")
     ) {
         Row(
@@ -279,15 +320,15 @@ private fun AppWhitelistRow(
                         contentDescription = item.appName,
                         modifier = Modifier
                             .size(42.dp)
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(11.dp))
                     )
                 } else {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .size(42.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(categoryAccent.copy(alpha = 0.16f))
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(categoryAccent.copy(alpha = 0.18f))
                     ) {
                         val icon = when (item.category) {
                             "Gemini & AI" -> Icons.Default.SmartToy
@@ -305,17 +346,12 @@ private fun AppWhitelistRow(
                 }
 
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = item.appName,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    Text(
+                        text = item.appName,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     Text(
                         text = item.packageName,
                         style = MaterialTheme.typography.labelSmall,
@@ -325,8 +361,8 @@ private fun AppWhitelistRow(
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = categoryAccent.copy(alpha = 0.14f)
+                            shape = RoundedCornerShape(6.dp),
+                            color = categoryAccent.copy(alpha = 0.16f)
                         ) {
                             Text(
                                 text = item.category,
@@ -337,8 +373,8 @@ private fun AppWhitelistRow(
                         }
                         if (item.isInstalledOnDevice) {
                             Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = CyberEmerald.copy(alpha = 0.14f)
+                                shape = RoundedCornerShape(6.dp),
+                                color = CyberEmerald.copy(alpha = 0.16f)
                             ) {
                                 Text(
                                     text = "Установлено",

@@ -33,11 +33,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = FreeServersRepository(application.applicationContext)
 
     val telemetryState: StateFlow<VpnTelemetryState> = MyVpnService.telemetryState
+    val coreLogs: StateFlow<List<String>> = MyVpnService.coreLogs
 
     val nodes: StateFlow<List<ProxyNode>> = repository.nodesFlow.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = SingBoxConfigBuilder.defaultFallbackNodes()
+        initialValue = emptyList()
     )
 
     val routingMode: StateFlow<RoutingMode> = repository.routingModeFlow.stateIn(
@@ -52,6 +53,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = null
     )
 
+    val includeGmsDependencies: StateFlow<Boolean> = repository.includeGmsDependenciesFlow.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = true
+    )
+
     val subscriptionSources: StateFlow<List<SubscriptionSource>> = repository.subscriptionSourcesFlow.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -61,11 +68,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val warpConfig: StateFlow<WarpConfig> = repository.warpConfigFlow.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = WarpConfig(
-            deviceId = "cf-warp-eb82a910",
-            accountToken = "token-init",
-            privateKey = "eG9yLXdhcnAtY2xvdWRmbGFyZS1hZWdpc2JveC0yMDI2"
-        )
+        initialValue = WarpConfig()
     )
 
     val whitelistPackages: StateFlow<Set<String>> = repository.whitelistPackagesFlow.stateIn(
@@ -100,13 +103,19 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 routingMode,
                 selectedNodeTag
             ) { nodeList, warp, mode, tag ->
-                val chosenNode = nodeList.find { it.tag == tag } ?: nodeList.firstOrNull()
-                val json = SingBoxConfigBuilder.buildConfig(
-                    nodes = nodeList,
-                    warpConfig = warp,
-                    routingMode = mode,
-                    selectedNodeTag = chosenNode?.tag
-                )
+                val chosenNode = nodeList.find { it.tag == tag } ?: nodeList.firstOrNull { it.isAlive } ?: nodeList.firstOrNull()
+                val json = if (nodeList.isNotEmpty()) {
+                    runCatching {
+                        SingBoxConfigBuilder.buildConfig(
+                            nodes = nodeList,
+                            warpConfig = if (warp.isRegistered) warp else null,
+                            routingMode = mode,
+                            selectedNodeTag = chosenNode?.tag
+                        )
+                    }.getOrDefault("{\n  \"error\": \"Невалидные параметры серверов\"\n}")
+                } else {
+                    "{\n  \"status\": \"Ожидание серверов. Нажмите «Обновить и протестировать серверы» или импортируйте ключ.\"\n}"
+                }
                 Triple(json, mode, chosenNode)
             }.collect { (json, mode, chosenNode) ->
                 MyVpnService.updatePreviewConfig(json, mode, chosenNode)
@@ -158,7 +167,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun selectNode(node: ProxyNode) {
         viewModelScope.launch {
             repository.setSelectedNodeTag(node.tag)
-            _statusBannerMessage.value = "Активная нода: ${node.flagEmoji} ${node.name} (${node.latencyMs} мс)"
+            val pingLabel = if (node.latencyMs > 0) "${node.latencyMs} мс" else "Недоступен"
+            _statusBannerMessage.value = "Выбрана нода: ${node.flagEmoji} ${node.name} ($pingLabel)"
             reloadVpnIfConnected()
         }
     }
@@ -167,22 +177,30 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         if (_isSyncingServers.value) return
         viewModelScope.launch {
             _isSyncingServers.value = true
-            _statusBannerMessage.value = "Сбор и проверка бесплатных серверов (GitHub + Зеркала)…"
+            _statusBannerMessage.value = "Загрузка подписок и реальный замер задержки нод…"
             val result = repository.syncAndTestAllSources()
             _isSyncingServers.value = false
             result.fold(
                 onSuccess = { list ->
-                    val best = list.firstOrNull()
+                    val aliveCount = list.count { it.isAlive }
+                    val best = list.firstOrNull { it.isAlive }
                     _statusBannerMessage.value = buildString {
-                        append("Обновлено ${list.size} нод (US/DE/NL/FI). ")
+                        append("Загружено ${list.size} нод (живых: $aliveCount). ")
                         if (best != null) {
                             append("Лучшая: ${best.flagEmoji} ${best.name} (${best.latencyMs} мс)")
+                        } else {
+                            append("Доступных нод не найдено — проверьте интернет.")
                         }
                     }
-                    reloadVpnIfConnected()
+                    if (telemetryState.value.connectionState == VpnConnectionState.CONNECTED) {
+                        val ctx = getApplication<Application>().applicationContext
+                        ctx.startService(Intent(ctx, MyVpnService::class.java).apply {
+                            action = MyVpnService.ACTION_URLTEST
+                        })
+                    }
                 },
                 onFailure = { err ->
-                    _statusBannerMessage.value = "Ошибка обновления: ${err.localizedMessage}"
+                    _statusBannerMessage.value = err.localizedMessage ?: "Ошибка загрузки подписок"
                 }
             )
         }
@@ -192,10 +210,31 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         if (_isGeneratingWarp.value) return
         viewModelScope.launch {
             _isGeneratingWarp.value = true
-            _statusBannerMessage.value = "Регистрация нового ключа Cloudflare WARP + AmneziaWG…"
-            val newWarp = repository.regenerateCloudflareWarpConfig()
-            _isGeneratingWarp.value = false
-            _statusBannerMessage.value = "WARP обновлён: ${newWarp.localAddressIpv4} • Reserved ${newWarp.reservedBytes} • AWG Jc=${newWarp.awgJc}"
+            _statusBannerMessage.value = "Регистрация устройства в Cloudflare WARP API (X25519)…"
+            repository.registerCloudflareWarp().fold(
+                onSuccess = { newWarp ->
+                    _isGeneratingWarp.value = false
+                    _statusBannerMessage.value =
+                        "WARP зарегистрирован: ${newWarp.localAddressIpv4} • Reserved ${newWarp.reservedBytes}"
+                    reloadVpnIfConnected()
+                },
+                onFailure = { err ->
+                    _isGeneratingWarp.value = false
+                    _statusBannerMessage.value =
+                        "Ошибка регистрации Cloudflare WARP: ${err.localizedMessage ?: "Нет ответа от API"}"
+                }
+            )
+        }
+    }
+
+    fun toggleIncludeGmsDependencies(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.setIncludeGmsDependencies(enabled)
+            _statusBannerMessage.value = if (enabled) {
+                "GMS / WebView добавлены в белый список (стабильная авторизация Google/Gemini)"
+            } else {
+                "GMS / WebView исключены из белого списка"
+            }
             reloadVpnIfConnected()
         }
     }
@@ -212,7 +251,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.resetDefaultWhitelist()
             _appRoutingItems.value = repository.loadAppsForSplitTunneling()
-            _statusBannerMessage.value = "Восстановлен стандартный белый список (Gemini, YouTube, Telegram, Браузеры)"
+            _statusBannerMessage.value = "Восстановлен стандартный белый список + GMS/WebView"
             reloadVpnIfConnected()
         }
     }
@@ -245,14 +284,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun clearCoreLogs() {
+        MyVpnService.clearLogs()
+    }
+
     fun dismissBanner() {
         _statusBannerMessage.value = null
     }
 
-    /**
-     * Открывает системные настройки приложения Google Gemini или Приложения Google
-     * для быстрой очистки кэша при смене региона.
-     */
     fun openGoogleOrGeminiAppSettings(context: Context, targetPackage: String = "com.google.android.apps.bard") {
         try {
             val pm = context.packageManager
@@ -269,12 +308,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             }
             context.startActivity(intent)
         } catch (_: Exception) {
-            try {
-                val fallback = Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(fallback)
-            } catch (_: Exception) {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
             }
         }
     }
@@ -286,14 +325,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 action = MyVpnService.ACTION_RELOAD_CONFIG
             }
             ctx.startService(intent)
-        } else {
-            val nodeList = repository.nodesFlow.first()
-            val warp = repository.warpConfigFlow.first()
-            val mode = repository.routingModeFlow.first()
-            val tag = repository.selectedNodeTagFlow.first()
-            val active = nodeList.find { it.tag == tag } ?: nodeList.firstOrNull()
-            val json = SingBoxConfigBuilder.buildConfig(nodeList, warp, mode, active?.tag)
-            MyVpnService.updatePreviewConfig(json, mode, active)
         }
     }
 }

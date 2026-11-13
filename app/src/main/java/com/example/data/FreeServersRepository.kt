@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.util.Base64
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -16,7 +17,7 @@ import com.example.model.ProxyProtocol
 import com.example.model.RoutingMode
 import com.example.model.SubscriptionSource
 import com.example.model.WarpConfig
-import com.example.vpn.SingBoxConfigBuilder
+import com.example.vpn.X25519
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -36,7 +37,6 @@ import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URLDecoder
-import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -45,8 +45,8 @@ import kotlin.system.measureTimeMillis
 private val Context.vpnDataStore by preferencesDataStore(name = "aegisbox_vpn_prefs")
 
 /**
- * Агрегатор бесплатных источников серверов, парсер URI/Base64/Clash YAML,
- * генератор Cloudflare WARP / AmneziaWG и менеджер поприложенческого Whitelist.
+ * Агрегатор реальных бесплатных источников серверов, парсер URI / Base64 / sing-box JSON / Clash YAML,
+ * реальный регистратор Cloudflare WARP (X25519) и менеджер поприложенческого Белого списка.
  */
 class FreeServersRepository(private val context: Context) {
 
@@ -54,59 +54,62 @@ class FreeServersRepository(private val context: Context) {
         private val KEY_ROUTING_MODE = stringPreferencesKey("routing_mode")
         private val KEY_SELECTED_NODE_TAG = stringPreferencesKey("selected_node_tag")
         private val KEY_WHITELIST_PACKAGES = stringSetPreferencesKey("whitelist_packages")
+        private val KEY_INCLUDE_GMS_DEPS = booleanPreferencesKey("include_gms_deps")
         private val KEY_SUBSCRIPTION_SOURCES = stringPreferencesKey("subscription_sources_json")
         private val KEY_CACHED_NODES = stringPreferencesKey("cached_nodes_json")
         private val KEY_WARP_CONFIG = stringPreferencesKey("warp_config_json")
 
-        // Разрешённые страны для работы Google Gemini без ошибки «Страна не поддерживается»
-        val GEMINI_SUPPORTED_COUNTRIES = setOf("US", "DE", "NL", "FI", "SE", "GB", "UK", "FR", "PL")
+        val GEMINI_SUPPORTED_COUNTRIES = setOf("US", "DE", "NL", "FI", "SE", "GB", "UK", "FR", "PL", "CA", "JP", "SG")
 
-        // Пакеты по умолчанию для Per-App Split Tunneling (Whitelist)
+        val SYSTEM_GMS_PACKAGES = setOf(
+            "com.google.android.gms",
+            "com.google.android.gsf",
+            "com.android.vending",
+            "com.google.android.webview"
+        )
+
         val DEFAULT_WHITELIST_PACKAGES = setOf(
-            "com.google.android.googlequicksearchbox", // Приложение Google
+            "com.google.android.googlequicksearchbox", // Google App
             "com.google.android.apps.bard",           // Google Gemini
             "com.google.android.youtube",             // YouTube
             "org.telegram.messenger",                 // Telegram
             "org.thunderdog.challegram",              // Telegram X
             "com.android.chrome",                     // Google Chrome
             "org.mozilla.firefox",                    // Firefox
-            "com.brave.browser",                      // Brave Browser
+            "com.brave.browser",                      // Brave
             "com.opera.browser",                      // Opera
             "com.microsoft.emmx"                      // Microsoft Edge
         )
 
         val DEFAULT_SUBSCRIPTION_SOURCES = listOf(
             SubscriptionSource(
-                id = "sub-vless-reality-ru",
-                title = "GitHub • VLESS Reality & Hysteria2 (Anti-TSPU)",
+                id = "sub-barry-vless",
+                title = "GitHub • Barry-Far V2Ray Configs (Sub1)",
                 url = "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/Sub1.txt",
                 formatHint = "Base64 / URI",
-                enabled = true,
-                lastNodeCount = 5
+                enabled = true
             ),
             SubscriptionSource(
-                id = "sub-autovpn-mirror",
-                title = "GitHub • Mahdibland V2Ray Aggregator (US/DE/NL/FI)",
+                id = "sub-mahdibland",
+                title = "GitHub • Mahdibland V2Ray Aggregator",
                 url = "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt",
                 formatHint = "Base64",
-                enabled = true,
-                lastNodeCount = 4
+                enabled = true
             ),
             SubscriptionSource(
-                id = "sub-clash-yaml",
-                title = "GitHub • Clash Meta YAML Obfuscated Nodes",
+                id = "sub-epodonios",
+                title = "GitHub • Epodonios All Configs",
                 url = "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
-                formatHint = "Plain / Clash YAML",
-                enabled = true,
-                lastNodeCount = 3
+                formatHint = "Plain URI",
+                enabled = true
             )
         )
     }
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(7, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -117,6 +120,10 @@ class FreeServersRepository(private val context: Context) {
 
     val selectedNodeTagFlow: Flow<String?> = context.vpnDataStore.data.map { prefs ->
         prefs[KEY_SELECTED_NODE_TAG]
+    }
+
+    val includeGmsDependenciesFlow: Flow<Boolean> = context.vpnDataStore.data.map { prefs ->
+        prefs[KEY_INCLUDE_GMS_DEPS] ?: true
     }
 
     val whitelistPackagesFlow: Flow<Set<String>> = context.vpnDataStore.data.map { prefs ->
@@ -134,36 +141,34 @@ class FreeServersRepository(private val context: Context) {
 
     val nodesFlow: Flow<List<ProxyNode>> = context.vpnDataStore.data.map { prefs ->
         val json = prefs[KEY_CACHED_NODES]
-        if (json.isNullOrBlank()) {
-            SingBoxConfigBuilder.defaultFallbackNodes()
-        } else {
-            parseNodesJson(json).ifEmpty { SingBoxConfigBuilder.defaultFallbackNodes() }
-        }
+        if (json.isNullOrBlank()) emptyList() else parseNodesJson(json)
     }
 
     val warpConfigFlow: Flow<WarpConfig> = context.vpnDataStore.data.map { prefs ->
         val json = prefs[KEY_WARP_CONFIG]
-        if (json.isNullOrBlank()) {
-            defaultWarpConfig()
-        } else {
-            parseWarpJson(json) ?: defaultWarpConfig()
+        if (json.isNullOrBlank()) WarpConfig() else (parseWarpJson(json) ?: WarpConfig())
+    }
+
+    suspend fun getEffectiveWhitelistPackages(): Set<String> {
+        val base = whitelistPackagesFlow.first().toMutableSet()
+        if (includeGmsDependenciesFlow.first()) {
+            base.addAll(SYSTEM_GMS_PACKAGES)
         }
+        return base
     }
 
     suspend fun setRoutingMode(mode: RoutingMode) {
-        context.vpnDataStore.edit { prefs ->
-            prefs[KEY_ROUTING_MODE] = mode.id
-        }
+        context.vpnDataStore.edit { it[KEY_ROUTING_MODE] = mode.id }
     }
 
     suspend fun setSelectedNodeTag(tag: String?) {
         context.vpnDataStore.edit { prefs ->
-            if (tag == null) {
-                prefs.remove(KEY_SELECTED_NODE_TAG)
-            } else {
-                prefs[KEY_SELECTED_NODE_TAG] = tag
-            }
+            if (tag == null) prefs.remove(KEY_SELECTED_NODE_TAG) else prefs[KEY_SELECTED_NODE_TAG] = tag
         }
+    }
+
+    suspend fun setIncludeGmsDependencies(enabled: Boolean) {
+        context.vpnDataStore.edit { it[KEY_INCLUDE_GMS_DEPS] = enabled }
     }
 
     suspend fun toggleWhitelistedPackage(packageName: String, enabled: Boolean) {
@@ -177,6 +182,7 @@ class FreeServersRepository(private val context: Context) {
     suspend fun resetDefaultWhitelist() {
         context.vpnDataStore.edit { prefs ->
             prefs[KEY_WHITELIST_PACKAGES] = detectDefaultWhitelistWithBrowsers()
+            prefs[KEY_INCLUDE_GMS_DEPS] = true
         }
     }
 
@@ -188,9 +194,13 @@ class FreeServersRepository(private val context: Context) {
 
         val newSource = SubscriptionSource(
             id = "sub-${UUID.randomUUID().toString().take(8)}",
-            title = title.ifBlank { Uri.parse(cleanUrl).host ?: "Подписка GitHub" },
+            title = title.ifBlank { Uri.parse(cleanUrl).host ?: "Подписка" },
             url = cleanUrl,
-            formatHint = if (cleanUrl.endsWith(".yaml") || cleanUrl.endsWith(".yml")) "Clash YAML" else "Base64 / URI",
+            formatHint = when {
+                cleanUrl.endsWith(".json", ignoreCase = true) -> "sing-box JSON"
+                cleanUrl.endsWith(".yaml", ignoreCase = true) || cleanUrl.endsWith(".yml", ignoreCase = true) -> "Clash YAML"
+                else -> "Base64 / URI"
+            },
             enabled = true
         )
         current.add(0, newSource)
@@ -202,121 +212,150 @@ class FreeServersRepository(private val context: Context) {
         saveSubscriptionSources(current)
     }
 
-    /**
-     * Ручной импорт ключа или списка ключей из буфера обмена (vless://, hy2://, trojan://, vmess://, ss://).
-     */
     suspend fun importRawKeyOrBlock(rawInput: String): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val parsed = parseSubscriptionPayload(rawInput.trim(), sourceUrl = "manual-import")
             if (parsed.isEmpty()) {
-                throw IllegalArgumentException("Не найдено валидных ссылок vless://, hy2://, trojan://, vmess:// или ss://")
+                throw IllegalArgumentException("Не найдено валидных ссылок vless://, hy2://, trojan://, vmess://, ss:// или sing-box JSON")
             }
             val tested = probeAndRankNodes(parsed)
             val existing = nodesFlow.first()
             val merged = (tested + existing)
-                .distinctBy { "${it.server}:${it.serverPort}:${it.protocol}" }
-                .take(40)
+                .distinctBy { "${it.server.lowercase()}:${it.serverPort}:${it.protocol}" }
+                .take(50)
             saveNodes(merged)
-            tested.firstOrNull()?.let { setSelectedNodeTag(it.tag) }
+            tested.firstOrNull { it.isAlive }?.let { setSelectedNodeTag(it.tag) }
+                ?: tested.firstOrNull()?.let { setSelectedNodeTag(it.tag) }
             tested.size
         }
     }
 
     /**
-     * Полный цикл синхронизации бесплатных подписок:
-     * 1. Скачивает списки из включённых GitHub-репозиториев и зеркал.
-     * 2. Декодирует Base64, Clash YAML и plain-text ссылки.
-     * 3. Фильтрует по локациям для Gemini (US, DE, NL, FI, SE, GB, FR) и обфускации (Reality, Hysteria2, WS+TLS, gRPC).
-     * 4. Проверяет задержку (TCP/TLS ping) и дедуплицирует серверы.
+     * Реальное обновление и тестирование серверов без заглушек:
+     * скачивает включённые подписки, парсит, фильтрует и измеряет реальный TCP RTT.
      */
     suspend fun syncAndTestAllSources(): Result<List<ProxyNode>> = withContext(Dispatchers.IO) {
         runCatching {
             val sources = subscriptionSourcesFlow.first()
-            val collectedNodes = mutableListOf<ProxyNode>()
+            val collected = mutableListOf<ProxyNode>()
             val updatedSources = mutableListOf<SubscriptionSource>()
+            val errors = mutableListOf<String>()
 
             for (source in sources) {
                 if (!source.enabled) {
                     updatedSources.add(source)
                     continue
                 }
-                val fetched = fetchSingleSubscription(source.url)
-                if (fetched.isNotEmpty()) {
-                    collectedNodes.addAll(fetched)
-                    updatedSources.add(
-                        source.copy(
-                            lastNodeCount = fetched.size,
-                            lastSyncTimeMs = System.currentTimeMillis()
+                val fetchedResult = fetchSingleSubscription(source.url)
+                fetchedResult.fold(
+                    onSuccess = { list ->
+                        collected.addAll(list)
+                        updatedSources.add(
+                            source.copy(
+                                lastNodeCount = list.size,
+                                lastSyncTimeMs = System.currentTimeMillis()
+                            )
                         )
-                    )
-                } else {
-                    updatedSources.add(
-                        source.copy(
-                            lastSyncTimeMs = System.currentTimeMillis()
-                        )
-                    )
-                }
+                    },
+                    onFailure = { err ->
+                        errors.add("${source.title}: ${err.message}")
+                        updatedSources.add(source.copy(lastSyncTimeMs = System.currentTimeMillis()))
+                    }
+                )
             }
 
-            // Всегда добавляем проверенные резервные ноды US/DE/NL/FI с VLESS Reality и Hysteria2,
-            // чтобы при блокировке GitHub raw провайдером у пользователя всегда был рабочий пул.
-            collectedNodes.addAll(SingBoxConfigBuilder.defaultFallbackNodes())
-
-            val deduplicated = collectedNodes
-                .distinctBy { "${it.server.lowercase()}:${it.serverPort}" }
-                .filter { it.CountryIsGeminiSupported() }
-                .sortedByDescending { it.protocol.obfuscationWeight }
-                .take(28)
-
-            val rankedNodes = probeAndRankNodes(deduplicated)
             saveSubscriptionSources(updatedSources)
-            saveNodes(rankedNodes)
-            rankedNodes
+
+            // Сохраняем также ранее импортированные вручную ноды
+            val manualNodes = nodesFlow.first().filter { it.sourceUrl == "manual-import" }
+            val combined = (manualNodes + collected)
+                .distinctBy { "${it.server.lowercase()}:${it.serverPort}:${it.protocol}" }
+
+            if (combined.isEmpty()) {
+                val reason = if (errors.isNotEmpty()) errors.joinToString("; ") else "Подписки не вернули валидных узлов"
+                throw IllegalStateException("Не удалось загрузить серверы: $reason")
+            }
+
+            val prioritized = combined
+                .sortedWith(
+                    compareByDescending<ProxyNode> { GEMINI_SUPPORTED_COUNTRIES.contains(it.countryCode.uppercase()) }
+                        .thenByDescending { it.protocol.obfuscationWeight }
+                )
+                .take(40)
+
+            val tested = probeAndRankNodes(prioritized)
+            saveNodes(tested)
+            tested
         }
     }
 
-    private fun ProxyNode.CountryIsGeminiSupported(): Boolean {
-        return GEMINI_SUPPORTED_COUNTRIES.contains(countryCode.uppercase())
+    suspend fun testExistingNodesTcp(): List<ProxyNode> = withContext(Dispatchers.IO) {
+        val current = nodesFlow.first()
+        if (current.isEmpty()) return@withContext emptyList()
+        val tested = probeAndRankNodes(current)
+        saveNodes(tested)
+        tested
     }
 
-    private fun fetchSingleSubscription(url: String): List<ProxyNode> {
-        return try {
+    suspend fun updateNodeDelaysFromCore(delaysMs: Map<String, Int>) {
+        if (delaysMs.isEmpty()) return
+        val current = nodesFlow.first()
+        if (current.isEmpty()) return
+        val updated = current.map { node ->
+            val delay = delaysMs[node.tag]
+            if (delay != null && delay > 0) {
+                node.copy(latencyMs = delay, isAlive = true)
+            } else {
+                node
+            }
+        }
+        saveNodes(updated)
+    }
+
+    private fun fetchSingleSubscription(url: String): Result<List<ProxyNode>> {
+        return runCatching {
             val request = Request.Builder()
                 .url(url)
-                .header("User-Agent", "sing-box/1.11.0 (Android 15; AegisBox-RU)")
+                .header("User-Agent", "sing-box/1.12.0 (Android; AegisBox)")
                 .build()
             okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return emptyList()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("HTTP ${response.code}")
+                }
                 val body = response.body?.string().orEmpty()
-                parseSubscriptionPayload(body, url).take(15)
+                parseSubscriptionPayload(body, url).take(25)
             }
-        } catch (_: Exception) {
-            emptyList()
         }
     }
 
-    /**
-     * Универсальный парсер: поддерживает Base64-полотна, plain-text списки URI и Clash YAML.
-     */
     fun parseSubscriptionPayload(payload: String, sourceUrl: String): List<ProxyNode> {
         val trimmed = payload.trim()
         if (trimmed.isEmpty()) return emptyList()
 
-        // 1. Попытка декодировать Base64, если нет явных схем или есть сплошной Base64 блок
+        // 1. Check sing-box JSON format directly
+        if (trimmed.startsWith("{")) {
+            val jsonNodes = parseSingBoxJsonOutbounds(trimmed, sourceUrl)
+            if (jsonNodes.isNotEmpty()) return jsonNodes
+        }
+
+        // 2. Decode Base64 if payload doesn't already contain URI schemes or Clash proxies
         val decodedText = if (!trimmed.contains("://") && !trimmed.contains("proxies:")) {
             tryDecodeBase64(trimmed) ?: trimmed
         } else {
             trimmed
         }
 
+        if (decodedText.trim().startsWith("{")) {
+            val jsonNodes = parseSingBoxJsonOutbounds(decodedText, sourceUrl)
+            if (jsonNodes.isNotEmpty()) return jsonNodes
+        }
+
         val results = mutableListOf<ProxyNode>()
 
-        // 2. Если это Clash YAML с секцией proxies:
         if (decodedText.contains("proxies:")) {
             results.addAll(parseClashYamlNodes(decodedText, sourceUrl))
         }
 
-        // 3. Построчный парсинг URI-ссылок (vless://, hy2://, hysteria2://, trojan://, vmess://, ss://)
         decodedText.lineSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
@@ -325,6 +364,66 @@ class FreeServersRepository(private val context: Context) {
             }
 
         return results
+    }
+
+    private fun parseSingBoxJsonOutbounds(jsonStr: String, sourceUrl: String): List<ProxyNode> {
+        return try {
+            val root = JSONObject(jsonStr)
+            val arr = root.optJSONArray("outbounds") ?: return emptyList()
+            val list = mutableListOf<ProxyNode>()
+            for (i in 0 until arr.length()) {
+                val ob = arr.optJSONObject(i) ?: continue
+                val type = ob.optString("type").lowercase()
+                val server = ob.optString("server").ifBlank { continue }
+                val port = ob.optInt("server_port", 443)
+                val tag = ob.optString("tag").ifBlank { "$type-$i" }
+                val (cc, cn) = detectCountryFromRemarkOrHost(tag, server)
+                val tls = ob.optJSONObject("tls")
+                val reality = tls?.optJSONObject("reality")
+                val transport = ob.optJSONObject("transport")
+                val proto = when (type) {
+                    "vless" -> when {
+                        reality?.optBoolean("enabled") == true -> ProxyProtocol.VLESS_REALITY
+                        transport?.optString("type") == "grpc" -> ProxyProtocol.VLESS_GRPC
+                        transport?.optString("type") == "ws" -> ProxyProtocol.VLESS_WS_TLS
+                        transport?.optString("type") == "httpupgrade" -> ProxyProtocol.VLESS_XHTTP
+                        else -> ProxyProtocol.VLESS_WS_TLS
+                    }
+                    "hysteria2" -> ProxyProtocol.HYSTERIA2
+                    "trojan" -> ProxyProtocol.TROJAN_TLS
+                    "vmess" -> ProxyProtocol.VMESS_TLS
+                    "shadowsocks" -> ProxyProtocol.SHADOWSOCKS
+                    else -> continue
+                }
+                val hash = abs("$server:$port:$type".hashCode()).toString(16).take(6)
+                list.add(
+                    ProxyNode(
+                        id = "$type-$hash",
+                        tag = "${cc.lowercase()}-$type-$hash",
+                        name = cleanNodeName(tag, cc, proto),
+                        protocol = proto,
+                        server = server,
+                        serverPort = port,
+                        countryCode = cc,
+                        countryName = cn,
+                        uuidOrPassword = ob.optString("uuid").ifBlank { ob.optString("password") },
+                        sni = tls?.optString("server_name").orEmpty().ifBlank { server },
+                        publicKey = reality?.optString("public_key").orEmpty(),
+                        shortId = reality?.optString("short_id").orEmpty(),
+                        flow = ob.optString("flow"),
+                        fingerprint = tls?.optJSONObject("utls")?.optString("fingerprint").orEmpty().ifBlank { "chrome" },
+                        transportType = transport?.optString("type").orEmpty().ifBlank { "tcp" },
+                        transportPath = transport?.optString("path").orEmpty().ifBlank { transport?.optString("service_name").orEmpty() },
+                        tlsEnabled = tls?.optBoolean("enabled", true) ?: true,
+                        method = ob.optString("method", "2022-blake3-aes-128-gcm"),
+                        sourceUrl = sourceUrl
+                    )
+                )
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun parseSingleUriLine(uriLine: String, sourceUrl: String): ProxyNode? {
@@ -354,20 +453,21 @@ class FreeServersRepository(private val context: Context) {
         val type = uri.getQueryParameter("type")?.lowercase() ?: "tcp"
         val sni = uri.getQueryParameter("sni")
             ?: uri.getQueryParameter("host")
-            ?: "www.microsoft.com"
+            ?: host
         val pbk = uri.getQueryParameter("pbk").orEmpty()
         val sid = uri.getQueryParameter("sid").orEmpty()
-        val flow = uri.getQueryParameter("flow") ?: "xtls-rprx-vision"
+        val flow = uri.getQueryParameter("flow").orEmpty()
         val fp = uri.getQueryParameter("fp") ?: "chrome"
         val path = uri.getQueryParameter("path")
             ?: uri.getQueryParameter("serviceName")
             ?: ""
 
+        // Do not accept "reality" without an authentic public key (pbk) — sing-box rejects invalid Reality configs
         val protocol = when {
-            security == "reality" || pbk.isNotEmpty() -> ProxyProtocol.VLESS_REALITY
+            (security == "reality" || pbk.isNotBlank()) && pbk.isNotBlank() -> ProxyProtocol.VLESS_REALITY
             type == "grpc" -> ProxyProtocol.VLESS_GRPC
-            type == "ws" -> ProxyProtocol.VLESS_WS_TLS
-            else -> ProxyProtocol.VLESS_REALITY
+            type == "xhttp" || type == "httpupgrade" || type == "splithttp" -> ProxyProtocol.VLESS_XHTTP
+            else -> ProxyProtocol.VLESS_WS_TLS
         }
 
         val (countryCode, countryName) = detectCountryFromRemarkOrHost(remark, host)
@@ -384,12 +484,13 @@ class FreeServersRepository(private val context: Context) {
             countryName = countryName,
             uuidOrPassword = uuid,
             sni = sni,
-            publicKey = pbk.ifEmpty { "mH8x9KpL2qR5vW7yZ0bN3cM6fJ4dG1sT8uV9wX2yZ4A" },
-            shortId = sid.ifEmpty { "6ba85179" },
+            publicKey = pbk,
+            shortId = sid,
             flow = flow,
             fingerprint = fp,
             transportType = type,
             transportPath = path,
+            tlsEnabled = security == "tls" || security == "reality" || port == 443,
             sourceUrl = sourceUrl,
             rawUri = rawUri
         )
@@ -400,9 +501,9 @@ class FreeServersRepository(private val context: Context) {
         val uri = Uri.parse(normalized)
         val host = uri.host ?: return null
         val port = if (uri.port > 0) uri.port else 443
-        val password = uri.userInfo ?: "hy2-public"
+        val password = uri.userInfo ?: return null
         val remark = uri.fragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "$host:$port"
-        val sni = uri.getQueryParameter("sni") ?: "www.cloudflare.com"
+        val sni = uri.getQueryParameter("sni") ?: host
         val obfsPassword = uri.getQueryParameter("obfs-password").orEmpty()
         val (countryCode, countryName) = detectCountryFromRemarkOrHost(remark, host)
         val shortHash = abs("$host:$port".hashCode()).toString(16).take(6)
@@ -455,10 +556,13 @@ class FreeServersRepository(private val context: Context) {
         val jsonStr = tryDecodeBase64(b64) ?: return null
         val obj = JSONObject(jsonStr)
         val host = obj.optString("add").ifEmpty { return null }
-        val port = obj.optString("port", "443").toIntOrNull() ?: 443
+        val port = obj.opt("port")?.toString()?.toIntOrNull() ?: 443
         val uuid = obj.optString("id").ifEmpty { return null }
         val ps = obj.optString("ps", "$host:$port")
         val sni = obj.optString("sni").ifEmpty { obj.optString("host", host) }
+        val net = obj.optString("net", "tcp")
+        val path = obj.optString("path", "/")
+        val tlsEnabled = obj.optString("tls").equals("tls", ignoreCase = true)
         val (countryCode, countryName) = detectCountryFromRemarkOrHost(ps, host)
         val shortHash = abs("$host:$port".hashCode()).toString(16).take(6)
 
@@ -473,6 +577,9 @@ class FreeServersRepository(private val context: Context) {
             countryName = countryName,
             uuidOrPassword = uuid,
             sni = sni,
+            transportType = net,
+            transportPath = path,
+            tlsEnabled = tlsEnabled,
             sourceUrl = sourceUrl,
             rawUri = rawUri
         )
@@ -485,7 +592,7 @@ class FreeServersRepository(private val context: Context) {
         } else {
             "SS-Node"
         }
-        val mainPart = withoutScheme.substringBefore("#")
+        val mainPart = withoutScheme.substringBefore("#").substringBefore("?")
         val atSplit = if (mainPart.contains("@")) {
             val userEncoded = mainPart.substringBefore("@")
             val hostPort = mainPart.substringAfter("@")
@@ -501,7 +608,7 @@ class FreeServersRepository(private val context: Context) {
         val password = methodAndPass.substringAfter(":")
         val host = hostAndPort.substringBeforeLast(":")
         val port = hostAndPort.substringAfterLast(":").toIntOrNull() ?: 443
-        if (host.isBlank()) return null
+        if (host.isBlank() || method.isBlank()) return null
 
         val (countryCode, countryName) = detectCountryFromRemarkOrHost(remark, host)
         val shortHash = abs("$host:$port".hashCode()).toString(16).take(6)
@@ -535,15 +642,17 @@ class FreeServersRepository(private val context: Context) {
             val server = props["server"] ?: return@forEach
             val port = props["port"]?.toIntOrNull() ?: 443
             val name = props["name"] ?: "$server:$port"
-            val (countryCode, countryName) = detectCountryFromRemarkOrHost(name, server)
-            val shortHash = abs("$server:$port".hashCode()).toString(16).take(6)
-
+            val pbk = props["public-key"].orEmpty()
             val protocol = when (type) {
-                "vless" -> ProxyProtocol.VLESS_REALITY
+                "vless" -> if (pbk.isNotBlank()) ProxyProtocol.VLESS_REALITY else ProxyProtocol.VLESS_WS_TLS
                 "hysteria2" -> ProxyProtocol.HYSTERIA2
                 "trojan" -> ProxyProtocol.TROJAN_TLS
+                "vmess" -> ProxyProtocol.VMESS_TLS
+                "ss" -> ProxyProtocol.SHADOWSOCKS
                 else -> return@forEach
             }
+            val (countryCode, countryName) = detectCountryFromRemarkOrHost(name, server)
+            val shortHash = abs("$server:$port".hashCode()).toString(16).take(6)
             list.add(
                 ProxyNode(
                     id = "clash-$shortHash",
@@ -554,8 +663,11 @@ class FreeServersRepository(private val context: Context) {
                     serverPort = port,
                     countryCode = countryCode,
                     countryName = countryName,
-                    uuidOrPassword = props["uuid"] ?: props["password"] ?: UUID.randomUUID().toString(),
-                    sni = props["servername"] ?: props["sni"] ?: "www.microsoft.com",
+                    uuidOrPassword = props["uuid"] ?: props["password"] ?: return@forEach,
+                    sni = props["servername"] ?: props["sni"] ?: server,
+                    publicKey = pbk,
+                    shortId = props["short-id"].orEmpty(),
+                    method = props["cipher"] ?: "2022-blake3-aes-128-gcm",
                     sourceUrl = sourceUrl
                 )
             )
@@ -564,26 +676,25 @@ class FreeServersRepository(private val context: Context) {
     }
 
     /**
-     * Измеряет задержку TCP/TLS рукопожатия до нод параллельно с ограничением пула сокетов.
+     * Реальный замер задержки (TCP handshake RTT) без фейковых значений.
+     * Недоступные узлы помечаются latencyMs = -1 и isAlive = false.
      */
     private suspend fun probeAndRankNodes(nodes: List<ProxyNode>): List<ProxyNode> = coroutineScope {
-        val semaphore = Semaphore(6)
+        val semaphore = Semaphore(8)
         nodes.map { node ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     val ping = measureTcpLatencyMs(node.server, node.serverPort)
-                    val resolvedLatency = if (ping in 1..2999) {
-                        ping
-                    } else {
-                        // Расчётная задержка по региону, если ICMP/прямой коннект в контейнере ограничен
-                        node.latencyMs.coerceIn(28, 140)
-                    }
-                    node.copy(latencyMs = resolvedLatency, isAlive = true)
+                    node.copy(
+                        latencyMs = ping,
+                        isAlive = ping in 1..2500
+                    )
                 }
             }
         }.awaitAll().sortedWith(
-            compareByDescending<ProxyNode> { it.protocol.obfuscationWeight }
-                .thenBy { it.latencyMs }
+            compareByDescending<ProxyNode> { it.isAlive }
+                .thenBy { if (it.latencyMs > 0) it.latencyMs else Int.MAX_VALUE }
+                .thenByDescending { it.protocol.obfuscationWeight }
         )
     }
 
@@ -592,60 +703,30 @@ class FreeServersRepository(private val context: Context) {
             var elapsed = -1L
             Socket().use { socket ->
                 elapsed = measureTimeMillis {
-                    socket.connect(InetSocketAddress(host, port), 1800)
+                    socket.connect(InetSocketAddress(host, port), 2200)
                 }
             }
-            elapsed.toInt()
+            elapsed.toInt().coerceAtLeast(1)
         } catch (_: Exception) {
             -1
         }
     }
 
     /**
-     * Встроенный генератор бесплатной конфигурации Cloudflare WARP + AmneziaWG.
-     * Отправляет запрос к официальному API `https://api.cloudflareclient.com/v0a2158/reg`
-     * и формирует обфусцированные заголовки пакетов AmneziaWG (Jc, Jmin, Jmax, S1, S2, H1-H4).
+     * Реальная регистрация устройства в Cloudflare WARP API (`POST /v0a2158/reg`)
+     * с генерацией настоящей пары ключей Curve25519 (X25519).
+     * При ошибке сети возвращает Failure без создания фейковых токенов.
      */
-    suspend fun regenerateCloudflareWarpConfig(): WarpConfig = withContext(Dispatchers.IO) {
-        val random = SecureRandom()
-        val privateKeyBytes = ByteArray(32).also { random.nextBytes(it) }
-        // Clamp Curve25519 private key per RFC 7748
-        privateKeyBytes[0] = (privateKeyBytes[0].toInt() and 248).toByte()
-        privateKeyBytes[31] = (privateKeyBytes[31].toInt() and 127).toByte()
-        privateKeyBytes[31] = (privateKeyBytes[31].toInt() or 64).toByte()
-        val privateKeyB64 = Base64.encodeToString(privateKeyBytes, Base64.NO_WRAP)
+    suspend fun registerCloudflareWarp(): Result<WarpConfig> = withContext(Dispatchers.IO) {
+        runCatching {
+            val keyPair = X25519.generateKeyPair()
 
-        val publicKeyBytes = ByteArray(32).also { random.nextBytes(it) }
-        val publicKeyB64 = Base64.encodeToString(publicKeyBytes, Base64.NO_WRAP)
-
-        // Рандомизированные параметры обфускации заголовков AmneziaWG против ТСПУ РФ
-        val awgJc = random.nextInt(4) + 4 // 4..7 junk packets
-        val awgJmin = 40 + random.nextInt(25)
-        val awgJmax = 750 + random.nextInt(250)
-        val awgS1 = 24 + random.nextInt(40)
-        val awgS2 = 40 + random.nextInt(48)
-        val awgH1 = 1100000000L + abs(random.nextLong() % 700000000L)
-        val awgH2 = 1100000000L + abs(random.nextLong() % 700000000L)
-        val awgH3 = 1100000000L + abs(random.nextLong() % 700000000L)
-        val awgH4 = 1100000000L + abs(random.nextLong() % 700000000L)
-
-        var deviceId = "warp-${UUID.randomUUID().toString().take(8)}"
-        var token = UUID.randomUUID().toString()
-        var ipv4 = "172.16.0.2/32"
-        var ipv6 = "2606:4700:110:8a3f:c412:91b2:1104:5c81/128"
-        var reserved = listOf(
-            random.nextInt(200) + 20,
-            random.nextInt(200) + 20,
-            random.nextInt(200) + 20
-        )
-
-        try {
             val reqJson = JSONObject().apply {
-                put("key", publicKeyB64)
+                put("key", keyPair.publicKeyBase64)
                 put("install_id", "")
                 put("fcm_token", "")
-                put("tos", "2026-01-01T00:00:00.000Z")
-                put("model", "Android")
+                put("tos", "2026-11-12T00:00:00.000Z")
+                put("model", Build.MODEL ?: "Android")
                 put("serial_number", UUID.randomUUID().toString().replace("-", "").take(12))
                 put("locale", "en_US")
             }
@@ -654,77 +735,66 @@ class FreeServersRepository(private val context: Context) {
                 .url("https://api.cloudflareclient.com/v0a2158/reg")
                 .header("User-Agent", "okhttp/4.10.0")
                 .header("CF-Client-Version", "a-6.35-2158")
+                .header("Content-Type", "application/json; charset=UTF-8")
                 .post(reqJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
             okHttpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val bodyStr = resp.body?.string().orEmpty()
-                    val json = JSONObject(bodyStr)
-                    deviceId = json.optString("id", deviceId)
-                    token = json.optString("token", token)
-                    val configObj = json.optJSONObject("config")
-                    val ifaceObj = configObj?.optJSONObject("interface")?.optJSONObject("addresses")
-                    if (ifaceObj != null) {
-                        val v4 = ifaceObj.optString("v4")
-                        val v6 = ifaceObj.optString("v6")
-                        if (v4.isNotBlank()) ipv4 = if (v4.contains("/")) v4 else "$v4/32"
-                        if (v6.isNotBlank()) ipv6 = if (v6.contains("/")) v6 else "$v6/128"
-                    }
-                    val clientIdB64 = configObj?.optString("client_id").orEmpty()
-                    if (clientIdB64.isNotBlank()) {
-                        val decoded = Base64.decode(clientIdB64, Base64.DEFAULT)
-                        if (decoded.size >= 3) {
-                            reserved = listOf(
-                                decoded[0].toInt() and 0xFF,
-                                decoded[1].toInt() and 0xFF,
-                                decoded[2].toInt() and 0xFF
-                            )
-                        }
-                    }
+                val bodyStr = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw IllegalStateException("Cloudflare API HTTP ${resp.code}: ${bodyStr.take(120)}")
                 }
+                val json = JSONObject(bodyStr)
+                val deviceId = json.optString("id")
+                val token = json.optString("token")
+                val configObj = json.getJSONObject("config")
+
+                val ifaceObj = configObj.getJSONObject("interface").getJSONObject("addresses")
+                val rawV4 = ifaceObj.getString("v4")
+                val rawV6 = ifaceObj.optString("v6", "")
+                val ipv4 = if (rawV4.contains("/")) rawV4 else "$rawV4/32"
+                val ipv6 = if (rawV6.isBlank()) "" else if (rawV6.contains("/")) rawV6 else "$rawV6/128"
+
+                val clientIdB64 = configObj.getString("client_id")
+                val clientIdBytes = Base64.decode(clientIdB64, Base64.DEFAULT)
+                if (clientIdBytes.size < 3) {
+                    throw IllegalStateException("Некорректный client_id от Cloudflare WARP")
+                }
+                val reserved = listOf(
+                    clientIdBytes[0].toInt() and 0xFF,
+                    clientIdBytes[1].toInt() and 0xFF,
+                    clientIdBytes[2].toInt() and 0xFF
+                )
+
+                val peersArr = configObj.getJSONArray("peers")
+                val peerObj = peersArr.getJSONObject(0)
+                val peerPubKey = peerObj.getString("public_key")
+                val endpointObj = peerObj.optJSONObject("endpoint")
+                val rawV4Endpoint = endpointObj?.optString("v4").orEmpty()
+                    .ifBlank { endpointObj?.optString("host").orEmpty() }
+                val endpointHost = rawV4Endpoint.substringBefore(":").ifBlank { "162.159.192.1" }
+                val endpointPort = rawV4Endpoint.substringAfter(":", "2408").toIntOrNull() ?: 2408
+
+                val newConfig = WarpConfig(
+                    deviceId = deviceId,
+                    accountToken = token,
+                    privateKey = keyPair.privateKeyBase64,
+                    publicKey = keyPair.publicKeyBase64,
+                    peerPublicKey = peerPubKey,
+                    endpointHost = endpointHost,
+                    endpointPort = endpointPort,
+                    localAddressIpv4 = ipv4,
+                    localAddressIpv6 = ipv6,
+                    reservedBytes = reserved,
+                    mtu = 1280,
+                    generatedAtEpochMs = System.currentTimeMillis()
+                )
+                saveWarpConfig(newConfig)
+                newConfig
             }
-        } catch (_: Exception) {
-            // При блокировке api.cloudflareclient.com ТСПУ используем сгенерированный локальный профиль WARP+AWG
         }
-
-        val endpoints = listOf(
-            "162.159.192.1" to 2408,
-            "162.159.193.10" to 1701,
-            "188.114.96.1" to 2408,
-            "188.114.97.3" to 500
-        )
-        val chosenEndpoint = endpoints[random.nextInt(endpoints.size)]
-
-        val newConfig = WarpConfig(
-            deviceId = deviceId,
-            accountToken = token,
-            privateKey = privateKeyB64,
-            endpointHost = chosenEndpoint.first,
-            endpointPort = chosenEndpoint.second,
-            localAddressIpv4 = ipv4,
-            localAddressIpv6 = ipv6,
-            reservedBytes = reserved,
-            awgJc = awgJc,
-            awgJmin = awgJmin,
-            awgJmax = awgJmax,
-            awgS1 = awgS1,
-            awgS2 = awgS2,
-            awgH1 = awgH1,
-            awgH2 = awgH2,
-            awgH3 = awgH3,
-            awgH4 = awgH4,
-            generatedAtEpochMs = System.currentTimeMillis()
-        )
-        saveWarpConfig(newConfig)
-        newConfig
     }
 
-    /**
-     * Возвращает полный список приложений для настройки Per-App Split Tunneling (Whitelist):
-     * объединяет целевые сервисы (Google Gemini, Google App, YouTube, Telegram, браузеры)
-     * и все установленные на устройстве приложения.
-     */
     suspend fun loadAppsForSplitTunneling(): List<AppRoutingItem> = withContext(Dispatchers.IO) {
         val whitelisted = whitelistPackagesFlow.first()
         val pm = context.packageManager
@@ -750,10 +820,10 @@ class FreeServersRepository(private val context: Context) {
         }
 
         val targetCatalog = listOf(
-            Triple("com.google.android.apps.bard", "Google Gemini (AI App)", "Gemini & AI"),
+            Triple("com.google.android.apps.bard", "Google Gemini", "Gemini & AI"),
             Triple("com.google.android.googlequicksearchbox", "Google (Поиск и Ассистент)", "Gemini & AI"),
-            Triple("com.google.android.youtube", "YouTube (1080p / 4K)", "Видео и Соцсети"),
-            Triple("org.telegram.messenger", "Telegram (Звонки и Медиа)", "Видео и Соцсети"),
+            Triple("com.google.android.youtube", "YouTube", "Видео и Соцсети"),
+            Triple("org.telegram.messenger", "Telegram", "Видео и Соцсети"),
             Triple("org.thunderdog.challegram", "Telegram X", "Видео и Соцсети"),
             Triple("com.android.chrome", "Google Chrome", "Браузеры"),
             Triple("org.mozilla.firefox", "Mozilla Firefox", "Браузеры"),
@@ -827,7 +897,6 @@ class FreeServersRepository(private val context: Context) {
                 pm.queryIntentActivities(browserIntent, 0)
             }
             browsers.mapNotNull { it.activityInfo?.packageName }.forEach { pkg ->
-                // Не добавляем Яндекс Браузер по умолчанию, чтобы российские сервисы в нём работали напрямую
                 if (!pkg.contains("yandex", ignoreCase = true) && pkg != context.packageName) {
                     set.add(pkg)
                 }
@@ -844,7 +913,7 @@ class FreeServersRepository(private val context: Context) {
             String(bytes, Charsets.UTF_8)
         } catch (_: Exception) {
             try {
-                val bytes = Base64.decode(input.trim(), Base64.URL_SAFE)
+                val bytes = Base64.decode(input.trim(), Base64.URL_SAFE or Base64.NO_PADDING)
                 String(bytes, Charsets.UTF_8)
             } catch (_: Exception) {
                 null
@@ -865,7 +934,9 @@ class FreeServersRepository(private val context: Context) {
                 "SE" to "Швеция"
             combined.contains("🇬🇧") || combined.contains("UK") || combined.contains("GB") || combined.contains("LONDON") ->
                 "GB" to "Великобритания"
-            else -> "US" to "США"
+            combined.contains("🇺🇸") || combined.contains("US") || combined.contains("USA") || combined.contains("ASHBURN") || combined.contains("DALLAS") ->
+                "US" to "США"
+            else -> "US" to "США / Глобал"
         }
     }
 
@@ -873,12 +944,8 @@ class FreeServersRepository(private val context: Context) {
         val cleaned = rawRemark
             .replace(Regex("[^\\p{L}\\p{N}\\s•\\-_.]"), "")
             .trim()
-            .take(28)
-        return if (cleaned.length >= 4) {
-            "$countryCode • $cleaned"
-        } else {
-            "$countryCode • ${protocol.displayName}"
-        }
+            .take(30)
+        return if (cleaned.length >= 3) cleaned else "$countryCode • ${protocol.displayName}"
     }
 
     private suspend fun saveSubscriptionSources(sources: List<SubscriptionSource>) {
@@ -896,9 +963,7 @@ class FreeServersRepository(private val context: Context) {
                 }
             )
         }
-        context.vpnDataStore.edit { prefs ->
-            prefs[KEY_SUBSCRIPTION_SOURCES] = arr.toString()
-        }
+        context.vpnDataStore.edit { it[KEY_SUBSCRIPTION_SOURCES] = arr.toString() }
     }
 
     private fun parseSourcesJson(json: String): List<SubscriptionSource> {
@@ -946,16 +1011,16 @@ class FreeServersRepository(private val context: Context) {
                     put("fingerprint", n.fingerprint)
                     put("transportType", n.transportType)
                     put("transportPath", n.transportPath)
+                    put("tlsEnabled", n.tlsEnabled)
                     put("method", n.method)
                     put("obfsPassword", n.obfsPassword)
                     put("latencyMs", n.latencyMs)
+                    put("isAlive", n.isAlive)
                     put("sourceUrl", n.sourceUrl)
                 }
             )
         }
-        context.vpnDataStore.edit { prefs ->
-            prefs[KEY_CACHED_NODES] = arr.toString()
-        }
+        context.vpnDataStore.edit { it[KEY_CACHED_NODES] = arr.toString() }
     }
 
     private fun parseNodesJson(json: String): List<ProxyNode> {
@@ -978,16 +1043,18 @@ class FreeServersRepository(private val context: Context) {
                             countryCode = o.optString("countryCode", "US"),
                             countryName = o.optString("countryName", "США"),
                             uuidOrPassword = o.optString("uuidOrPassword"),
-                            sni = o.optString("sni", "www.microsoft.com"),
+                            sni = o.optString("sni"),
                             publicKey = o.optString("publicKey"),
                             shortId = o.optString("shortId"),
-                            flow = o.optString("flow", "xtls-rprx-vision"),
+                            flow = o.optString("flow"),
                             fingerprint = o.optString("fingerprint", "chrome"),
                             transportType = o.optString("transportType", "tcp"),
                             transportPath = o.optString("transportPath"),
+                            tlsEnabled = o.optBoolean("tlsEnabled", true),
                             method = o.optString("method", "2022-blake3-aes-128-gcm"),
                             obfsPassword = o.optString("obfsPassword"),
-                            latencyMs = o.optInt("latencyMs", 45),
+                            latencyMs = o.optInt("latencyMs", -1),
+                            isAlive = o.optBoolean("isAlive", false),
                             sourceUrl = o.optString("sourceUrl", "cached")
                         )
                     )
@@ -1003,66 +1070,44 @@ class FreeServersRepository(private val context: Context) {
             put("deviceId", config.deviceId)
             put("accountToken", config.accountToken)
             put("privateKey", config.privateKey)
+            put("publicKey", config.publicKey)
             put("peerPublicKey", config.peerPublicKey)
             put("endpointHost", config.endpointHost)
             put("endpointPort", config.endpointPort)
             put("localAddressIpv4", config.localAddressIpv4)
             put("localAddressIpv6", config.localAddressIpv6)
             put("reservedBytes", JSONArray(config.reservedBytes))
-            put("awgJc", config.awgJc)
-            put("awgJmin", config.awgJmin)
-            put("awgJmax", config.awgJmax)
-            put("awgS1", config.awgS1)
-            put("awgS2", config.awgS2)
-            put("awgH1", config.awgH1)
-            put("awgH2", config.awgH2)
-            put("awgH3", config.awgH3)
-            put("awgH4", config.awgH4)
+            put("mtu", config.mtu)
             put("generatedAtEpochMs", config.generatedAtEpochMs)
         }
-        context.vpnDataStore.edit { prefs ->
-            prefs[KEY_WARP_CONFIG] = obj.toString()
-        }
+        context.vpnDataStore.edit { it[KEY_WARP_CONFIG] = obj.toString() }
     }
 
     private fun parseWarpJson(json: String): WarpConfig? {
         return try {
             val o = JSONObject(json)
             val resArr = o.optJSONArray("reservedBytes")
-            val reserved = if (resArr != null && resArr.length() >= 3) {
+            val reserved = if (resArr != null && resArr.length() == 3) {
                 listOf(resArr.getInt(0), resArr.getInt(1), resArr.getInt(2))
             } else {
-                listOf(142, 88, 219)
+                emptyList()
             }
             WarpConfig(
-                deviceId = o.optString("deviceId", "warp-cf-ru"),
-                accountToken = o.optString("accountToken", ""),
-                privateKey = o.optString("privateKey", "Y2xvdWRmbGFyZS13YXJwLXByaXZhdGUta2V5LTI1NTE5"),
+                deviceId = o.optString("deviceId"),
+                accountToken = o.optString("accountToken"),
+                privateKey = o.optString("privateKey"),
+                publicKey = o.optString("publicKey"),
                 peerPublicKey = o.optString("peerPublicKey", "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="),
                 endpointHost = o.optString("endpointHost", "162.159.192.1"),
                 endpointPort = o.optInt("endpointPort", 2408),
-                localAddressIpv4 = o.optString("localAddressIpv4", "172.16.0.2/32"),
-                localAddressIpv6 = o.optString("localAddressIpv6", "2606:4700:110:8a3f:c412:91b2:1104:5c81/128"),
+                localAddressIpv4 = o.optString("localAddressIpv4"),
+                localAddressIpv6 = o.optString("localAddressIpv6"),
                 reservedBytes = reserved,
-                awgJc = o.optInt("awgJc", 5),
-                awgJmin = o.optInt("awgJmin", 50),
-                awgJmax = o.optInt("awgJmax", 1000),
-                awgS1 = o.optInt("awgS1", 32),
-                awgS2 = o.optInt("awgS2", 48),
-                awgH1 = o.optLong("awgH1", 1249018421L),
-                awgH2 = o.optLong("awgH2", 1984120512L),
-                awgH3 = o.optLong("awgH3", 1658923104L),
-                awgH4 = o.optLong("awgH4", 1409581293L),
-                generatedAtEpochMs = o.optLong("generatedAtEpochMs", System.currentTimeMillis())
+                mtu = o.optInt("mtu", 1280),
+                generatedAtEpochMs = o.optLong("generatedAtEpochMs", 0L)
             )
         } catch (_: Exception) {
             null
         }
     }
-
-    private fun defaultWarpConfig(): WarpConfig = WarpConfig(
-        deviceId = "cf-warp-eb82a910",
-        accountToken = "f891a2b3-c4d5-4e6f-9a0b-1c2d3e4f5a6b",
-        privateKey = "eG9yLXdhcnAtY2xvdWRmbGFyZS1hZWdpc2JveC0yMDI2"
-    )
 }
