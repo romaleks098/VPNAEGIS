@@ -42,19 +42,35 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -65,13 +81,91 @@ import androidx.compose.ui.unit.sp
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.WarpViolet
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+
+/**
+ * Состояние реального аппаратного размытия фона (Liquid Glass Backdrop Blur)
+ * на базе нативного Compose 1.7 `GraphicsLayer` + `BlurEffect`.
+ */
+@Stable
+class HazeState {
+    internal var backgroundLayer: GraphicsLayer? by mutableStateOf(null)
+    internal var sourceOffsetInRoot: Offset by mutableStateOf(Offset.Zero)
+}
+
+@Immutable
+data class HazeTint(val color: Color)
+
+@Immutable
+data class HazeStyle(
+    val backgroundColor: Color = Color(0xFF0A1020),
+    val tint: HazeTint = HazeTint(Color(0xFF0C1428).copy(alpha = 0.55f)),
+    val blurRadius: Dp = 22.dp,
+    val noiseFactor: Float = 0.04f
+)
+
+@Composable
+fun Modifier.hazeSource(state: HazeState): Modifier {
+    val layer = rememberGraphicsLayer()
+    SideEffect {
+        state.backgroundLayer = layer
+    }
+    return this
+        .onGloballyPositioned { coords ->
+            state.sourceOffsetInRoot = coords.positionInRoot()
+        }
+        .drawWithContent {
+            layer.record {
+                this@drawWithContent.drawContent()
+            }
+            drawLayer(layer)
+        }
+}
+
+@Composable
+fun Modifier.hazeEffect(
+    state: HazeState,
+    style: HazeStyle = HazeStyle()
+): Modifier {
+    val blurLayer = rememberGraphicsLayer()
+    val density = LocalDensity.current
+    val blurRadiusPx = with(density) { style.blurRadius.toPx() }
+    var cardOffsetInRoot by remember { mutableStateOf(Offset.Zero) }
+
+    return this
+        .onGloballyPositioned { coords ->
+            cardOffsetInRoot = coords.positionInRoot()
+        }
+        .drawWithContent {
+            drawRect(color = style.backgroundColor.copy(alpha = 0.76f))
+            val bgLayer = state.backgroundLayer
+            if (bgLayer != null && size.width > 0f && size.height > 0f) {
+                val dx = state.sourceOffsetInRoot.x - cardOffsetInRoot.x
+                val dy = state.sourceOffsetInRoot.y - cardOffsetInRoot.y
+                blurLayer.apply {
+                    if (blurRadiusPx > 0f) {
+                        renderEffect = BlurEffect(
+                            radiusX = blurRadiusPx,
+                            radiusY = blurRadiusPx,
+                            edgeTreatment = TileMode.Clamp
+                        )
+                    }
+                    record {
+                        clipRect(0f, 0f, size.width, size.height) {
+                            translate(left = dx, top = dy) {
+                                drawLayer(bgLayer)
+                            }
+                        }
+                    }
+                }
+                drawLayer(blurLayer)
+            }
+            drawRect(color = style.tint.color)
+            drawContent()
+        }
+}
 
 /**
  * Живой глубинный фон (Dynamic Fluid Mesh):

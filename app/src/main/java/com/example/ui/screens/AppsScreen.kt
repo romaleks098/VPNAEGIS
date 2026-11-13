@@ -64,7 +64,7 @@ import com.example.ui.theme.CyberEmerald
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.SignalAmber
 import com.example.ui.theme.WarpViolet
-import dev.chrisbanes.haze.HazeState
+import com.example.ui.components.HazeState
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

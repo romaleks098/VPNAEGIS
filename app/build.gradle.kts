@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.aegisboxvpn.kxvprz"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "2.6.0-RU"
+    versionCode = 2
+    versionName = "3.0.0-LiquidGlass"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -97,7 +97,6 @@ dependencies {
   // Official prebuilt sing-box libbox AAR + local override if present in app/libs
   implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
   implementation(libs.libbox.android)
-  implementation(libs.haze)
 
   implementation(platform(libs.androidx.compose.bom))
   // implementation(platform(libs.firebase.bom))

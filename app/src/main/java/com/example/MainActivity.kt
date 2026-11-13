@@ -55,8 +55,8 @@ import com.example.ui.screens.MainScreen
 import com.example.ui.screens.SourcesScreen
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.MyApplicationTheme
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import com.example.ui.components.HazeState
+import com.example.ui.components.hazeSource
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -148,12 +148,11 @@ fun AegisBoxVpnApp(
     Box(modifier = Modifier.fillMaxSize()) {
         // 1. Live Dynamic Fluid Mesh Backdrop + Haze Source Layer
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .hazeSource(state = hazeState)
+            modifier = Modifier.fillMaxSize()
         ) {
             FluidMeshBackground(
-                isVpnConnected = telemetry.connectionState == VpnConnectionState.CONNECTED
+                isVpnConnected = telemetry.connectionState == VpnConnectionState.CONNECTED,
+                modifier = Modifier.hazeSource(state = hazeState)
             )
 
             // 2. Main Content Container (status bar safe padding + generous bottom padding in LazyColumns)

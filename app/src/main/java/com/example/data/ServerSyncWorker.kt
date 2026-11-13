@@ -31,19 +31,21 @@ class ServerSyncWorker(
         private const val UNIQUE_WORK_NAME = "aegisbox_free_servers_sync_3h"
 
         fun schedulePeriodicSync(context: Context) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
-                .build()
+            runCatching {
+                val constraints = Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build()
 
-            val request = PeriodicWorkRequestBuilder<ServerSyncWorker>(3, TimeUnit.HOURS)
-                .setConstraints(constraints)
-                .build()
+                val request = PeriodicWorkRequestBuilder<ServerSyncWorker>(3, TimeUnit.HOURS)
+                    .setConstraints(constraints)
+                    .build()
 
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                UNIQUE_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
-                request
-            )
+                WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                    UNIQUE_WORK_NAME,
+                    ExistingPeriodicWorkPolicy.KEEP,
+                    request
+                )
+            }
         }
     }
 }

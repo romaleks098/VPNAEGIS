@@ -67,29 +67,28 @@ jobs:
         run: |
           gradle assembleRelease --no-daemon
           mkdir -p release-assets
-          cp app/build/outputs/apk/release/*.apk release-assets/AegisBox-VPN-v2.6.0-RU-release.apk
+          cp app/build/outputs/apk/release/*.apk release-assets/AegisBox-VPN-v3.0.0-LiquidGlass-release.apk
 
       - name: Upload Signed Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AegisBox-VPN-v2.6.0-RU-release
-          path: release-assets/AegisBox-VPN-v2.6.0-RU-release.apk
+          name: AegisBox-VPN-v3.0.0-LiquidGlass-release
+          path: release-assets/AegisBox-VPN-v3.0.0-LiquidGlass-release.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.6.0-ru
-          name: "AegisBox VPN v2.6.0-RU"
+          tag_name: v3.0.0-liquid-glass
+          name: "AegisBox VPN v3.0.0 — Liquid Glass & sing-box Core"
           body: |
-            ### AegisBox VPN (sing-box + VLESS Reality + Cloudflare WARP)
-            - **Google Gemini / AI Studio:** каскадная цепочка `VLESS Reality -> Cloudflare WARP Detour`
-            - **YouTube 4K & Telegram:** авто-балансировщик `urltest` (180с, `gstatic.com/generate_204`)
-            - **РФ-сервисы напрямую:** Per-App Whitelist + прямой DNS `77.88.8.8` для `.ru` / `.рф` / банков / Госуслуг
-            - **Защита от утечек:** TUN `172.19.0.1/30`, строго `ipv4_only`, `FakeIP 198.18.0.0/15` + DoH `1.1.1.1`
-            - **Платформа:** Android 8.0+ (`minSdk 26`), `arm64-v8a`, поддержка `16 KB page size`
+            ### AegisBox VPN v3.0.0 (Liquid Glass + real `libbox` / `sing-box` 1.12+)
+            - **Настоящее ядро `libbox` (`net.clever-vpn:libbox-android:2.1.5`):** полный `PlatformInterface`, `CommandServer` и `CommandClient` с живой скоростью, логами и `urlTest`.
+            - **Google Gemini без ограничений:** каскад `VLESS Reality -> Cloudflare WARP` (секция `endpoints`, реальный X25519 WARP API, блокировка утечного QUIC UDP/443).
+            - **Белый список без ошибок:** только `addAllowedApplication()` + опция «Системные зависимости (GMS / WebView)».
+            - **Редизайн Liquid Glass:** живой фон `FluidMeshBackground`, реальный блюр `Haze`, Hero-сфера и парящий стеклянный док-бар.
 
-            Скачайте файл **`AegisBox-VPN-v2.6.0-RU-release.apk`** ниже и установите на Android-устройство.
+            Скачайте **`AegisBox-VPN-v3.0.0-LiquidGlass-release.apk`** ниже и установите на Android 8.0+ (`arm64-v8a` / `16 KB page size`).
           make_latest: true
-          files: release-assets/AegisBox-VPN-v2.6.0-RU-release.apk
+          files: release-assets/AegisBox-VPN-v3.0.0-LiquidGlass-release.apk
