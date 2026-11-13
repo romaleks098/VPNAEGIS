@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">AegisBox VPN</string>
+    <string name="vpn_tile_label">AegisBox VPN</string>
+    <string name="vpn_notification_channel">Статус туннеля sing-box</string>
+    <string name="action_switch_node">Сменить ноду</string>
+    <string name="action_disconnect">Отключить</string>
+    <string name="nav_dashboard">Туннель</string>
+    <string name="nav_apps">Маршруты</string>
+    <string name="nav_sources">Источники</string>
+    <string name="mode_auto_best">Auto Best Free</string>
+    <string name="mode_vless_warp">VLESS + WARP Chain</string>
+    <string name="clear_gemini_cache">Кэш Google / Gemini</string>
+    <string name="inspect_singbox_config">JSON-конфиг sing-box</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "AegisBox VPN",
+  "description": "VPN-клиент на базе sing-box с умным каскадированием VLESS Reality + Cloudflare WARP, FakeIP DNS и поприложенческим белым списком (Split Tunneling).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
